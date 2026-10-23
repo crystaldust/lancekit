@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# Written by Claude Code on each mod load
+plugins/*/.claude-plugin/types/
+.DS_Store

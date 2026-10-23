@@ -1,0 +1,13 @@
+{
+  "name": "ecc-progress",
+  "version": "0.1.0",
+  "description": "Side pane showing ECC PRD milestones and /prp-implement task progress",
+  "author": {
+    "name": "crystaldust",
+    "url": "https://github.com/crystaldust"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/crystaldust/lancekit/tree/main/plugins/ecc-progress",
+  "repository": "https://github.com/crystaldust/lancekit",
+  "types": "./types/index.d.ts"
+}

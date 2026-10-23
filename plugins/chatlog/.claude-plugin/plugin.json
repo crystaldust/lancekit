@@ -1,0 +1,38 @@
+{
+  "name": "chatlog",
+  "version": "0.1.0",
+  "description": "Records every prompt, answer and tool call of a Claude Code session to .claude/chatlog in real time (Markdown + text + JSONL), including interrupts, exits, /clear and resume, and replays a log in terminal style",
+  "author": {
+    "name": "crystaldust",
+    "url": "https://github.com/crystaldust"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/crystaldust/lancekit/tree/main/plugins/chatlog",
+  "repository": "https://github.com/crystaldust/lancekit",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "formats": {
+      "type": "string",
+      "title": "Readable formats",
+      "description": "Readable files written beside the JSONL log (the JSONL is always written; replay reads it).",
+      "options": [
+        "md+txt",
+        "md",
+        "txt"
+      ],
+      "default": "md+txt"
+    },
+    "gitignore": {
+      "type": "boolean",
+      "title": "Keep logs out of git",
+      "description": "Write .claude/chatlog/.gitignore (ignore everything) when the folder is first created.",
+      "default": true
+    },
+    "redact": {
+      "type": "boolean",
+      "title": "Mask secrets",
+      "description": "Mask API keys, tokens, private keys and password=... values before they reach disk.",
+      "default": true
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "lancekit",
+  "owner": {
+    "name": "crystaldust",
+    "url": "https://github.com/crystaldust"
+  },
+  "metadata": {
+    "description": "Claude Code extensions: ECC workflow helpers and session chatlogs"
+  },
+  "plugins": [
+    {
+      "name": "ecc-progress",
+      "source": "./plugins/ecc-progress",
+      "description": "Side pane showing ECC PRD milestones and /prp-implement task progress"
+    },
+    {
+      "name": "ecc-doc-check",
+      "source": "./plugins/ecc-doc-check",
+      "description": "Read-only consistency audit across ECC PRDs, PRP-PRDs and PRP plans"
+    },
+    {
+      "name": "chatlog",
+      "source": "./plugins/chatlog",
+      "description": "Real-time session chatlog (Markdown + text + JSONL) with interrupts, exits, /clear and resume, plus terminal-style replay"
+    }
+  ]
+}

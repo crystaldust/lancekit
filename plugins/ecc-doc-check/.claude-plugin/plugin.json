@@ -1,0 +1,12 @@
+{
+  "name": "ecc-doc-check",
+  "version": "0.1.0",
+  "description": "Read-only consistency audit across ECC PRDs, PRP-PRDs and PRP plans: status drift, invalid statuses, broken or archived links, orphan plans",
+  "author": {
+    "name": "crystaldust",
+    "url": "https://github.com/crystaldust"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/crystaldust/lancekit/tree/main/plugins/ecc-doc-check",
+  "repository": "https://github.com/crystaldust/lancekit"
+}
