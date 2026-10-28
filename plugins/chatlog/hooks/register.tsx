@@ -16,7 +16,7 @@ import {
   turnNote,
 } from './render'
 
-const LOG_DIR = '.claude/chatlog'
+const LOG_SUBDIR = '.claude/chatlog'
 const PANE = 'chatlog-replay'
 const RECENT = 15
 const SOURCE_ACTION: Record<string, SessionAction> = {
@@ -70,10 +70,18 @@ async function tzMinutes($: $): Promise<number> {
   return minutes
 }
 
+/**
+ * The log folder, absolute under the project root: a relative path would follow
+ * the session's working directory, which a shell `cd` moves.
+ */
+async function logDir($: $): Promise<string> {
+  return `${await $.session.root()}/${LOG_SUBDIR}`
+}
+
 /** Logs in the folder, most recently written first. */
-async function listLogs($: $): Promise<LogFile[]> {
-  if (!(await $.fs.exists(LOG_DIR))) return []
-  return (await $.fs.list(LOG_DIR))
+async function listLogs($: $, dir: string): Promise<LogFile[]> {
+  if (!(await $.fs.exists(dir))) return []
+  return (await $.fs.list(dir))
     .filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl'))
     .map(entry => ({ name: entry.name.slice(0, -'.jsonl'.length), mtimeMs: entry.mtimeMs }))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -94,11 +102,12 @@ async function openLog($: $, settings: Settings, action: SessionAction, sessionI
   const tz = await tzMinutes($)
   const cwd = await $.session.cwd()
   const ts = nowIso()
-  const existing = (await listLogs($)).find(log => log.name.endsWith(`_${shortId(sessionId)}`))
-  const base = `${LOG_DIR}/${existing?.name ?? `${fileStamp(ts, tz)}_${shortId(sessionId)}`}`
+  const dir = await logDir($)
+  const existing = (await listLogs($, dir)).find(log => log.name.endsWith(`_${shortId(sessionId)}`))
+  const base = `${dir}/${existing?.name ?? `${fileStamp(ts, tz)}_${shortId(sessionId)}`}`
   if (!existing) {
-    if (settings.gitignore && !(await $.fs.exists(`${LOG_DIR}/.gitignore`))) {
-      await $.fs.write(`${LOG_DIR}/.gitignore`, '*\n')
+    if (settings.gitignore && !(await $.fs.exists(`${dir}/.gitignore`))) {
+      await $.fs.write(`${dir}/.gitignore`, '*\n')
     }
     await $.fs.write(`${base}.jsonl`, '')
     if (settings.md) await $.fs.write(`${base}.md`, markdownHeader(sessionId, cwd, ts, tz))
@@ -144,14 +153,15 @@ function parseLog(text: string): ChatEvent[] {
 }
 
 async function replay($: $, target: string | undefined): Promise<string> {
-  const logs = await listLogs($)
+  const dir = await logDir($)
+  const logs = await listLogs($, dir)
   const picked = target === undefined
     ? logs[0]
     : /^\d+$/.test(target)
       ? logs[Number(target) - 1]
       : logs.find(log => log.name.includes(target))
   if (!picked) return `No chatlog matches "${target ?? 'latest'}". Run /chatlog list.`
-  const path = `${LOG_DIR}/${picked.name}.jsonl`
+  const path = `${dir}/${picked.name}.jsonl`
   const events = parseLog(await $.fs.read(path))
   await update($, replayAtom, () => ({ name: picked.name, path, events }))
   await $.ui.open({ id: PANE, title: `Replay · ${picked.name}`, focus: true })
@@ -162,12 +172,13 @@ async function replay($: $, target: string | undefined): Promise<string> {
 }
 
 async function listText($: $): Promise<string> {
-  const logs = await listLogs($)
-  if (logs.length === 0) return `No chatlogs yet under ${LOG_DIR}.`
+  const dir = await logDir($)
+  const logs = await listLogs($, dir)
+  if (logs.length === 0) return `No chatlogs yet under ${dir}.`
   const current = (await read($, logAtom)).base
   return logs
     .slice(0, RECENT)
-    .map((log, index) => `${index + 1}. ${log.name}${`${LOG_DIR}/${log.name}` === current ? '  (current)' : ''}`)
+    .map((log, index) => `${index + 1}. ${log.name}${`${dir}/${log.name}` === current ? '  (current)' : ''}`)
     .join('\n')
 }
 

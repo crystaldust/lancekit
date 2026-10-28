@@ -88,14 +88,19 @@ test('writes terminal-style text and Markdown', () => {
   expect(toMarkdown({ kind: 'end', ts: TS, reason: 'prompt_input_exit' }, CST)).toContain('Session ended')
 })
 
-/** A disk in memory under the hooks the plugin's `$.fs` and `$.process.run` calls reach. */
-function fakeDisk(on: On): Map<string, string> {
+/**
+ * A disk in memory under the hooks the plugin's `$.fs` and `$.process.run` calls reach.
+ * `cwd` is the session's working directory (the project root stays `/work/demo`);
+ * `touched` collects every path written, as the plugin spelled it.
+ */
+function fakeDisk(on: On, { cwd = '/work/demo', touched = [] as string[] } = {}): Map<string, string> {
   const files = new Map<string, string>()
   const key = (path: string) => (path.includes('.claude/') ? path.slice(path.indexOf('.claude/')) : path.replace(/^\/+/, ''))
   on('fs.exists', (_, e) => ({
     value: [...files.keys()].some(file => file === key(e.path) || file.startsWith(`${key(e.path)}/`)),
   }))
   on('fs.write', (_, e) => {
+    touched.push(e.path)
     files.set(key(e.path), e.text)
     return { value: undefined }
   })
@@ -108,12 +113,14 @@ function fakeDisk(on: On): Map<string, string> {
   on('process.run', (_, e) => {
     const done = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
     if (e.argv[0] === 'date') return { value: { ...done, stdout: '+0800\n' } }
+    touched.push(String(e.argv[4]))
     const path = key(String(e.argv[4]))
     files.set(path, (files.get(path) ?? '') + (e.init?.stdin ?? ''))
     return { value: { ...done, stdout: '' } }
   })
   on('session.id', () => ({ value: 'abcdef1234567890' }))
-  on('session.cwd', () => ({ value: '/work/demo' }))
+  on('session.cwd', () => ({ value: cwd }))
+  on('session.root', () => ({ value: '/work/demo' }))
   on('command.register', () => ({ value: { command: 'chatlog' } }))
   on('ui.toast', () => ({ value: undefined }))
   return files
@@ -169,6 +176,23 @@ test('a resumed session continues its own log', async ($, on) => {
   const lines = files.get('.claude/chatlog/2026-10-22_090000_abcdef12.jsonl')?.trim().split('\n') ?? []
   expect(lines.length).toBe(2)
   expect(JSON.parse(lines[1] ?? '{}').action).toBe('resume')
+})
+
+test('keeps writing under the project root after a shell cd', async ($, on) => {
+  const touched: string[] = []
+  fakeDisk(on, { cwd: '/work/demo/packages/app', touched })
+  on('classic.SessionStart', () => ({}))
+
+  await $.classic.SessionStart({ source: 'startup', session_id: 'abcdef1234567890' })
+  await $.session.append({
+    door: 'prompt',
+    origin: { kind: 'composer' },
+    uuid: 'u1',
+    message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'hello' }] },
+  })
+
+  expect(touched.length).toBeGreaterThan(0)
+  expect(touched.filter(path => !path.startsWith('/work/demo/.claude/chatlog/'))).toEqual([])
 })
 
 test('/chatlog replay draws a log in terminal style, on every surface', async ($, on) => {

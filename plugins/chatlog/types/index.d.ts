@@ -12,7 +12,7 @@ export type ChatEvent =
   | { kind: 'note'; ts: string; text: string }
 
 export type LogState = {
-  /** Path of the log without extension, e.g. `.claude/chatlog/2026-10-23_153012_ab12cd34`. */
+  /** Absolute path of the log without extension, e.g. `/repo/.claude/chatlog/2026-10-23_153012_ab12cd34`. */
   base: string | null
   sessionId: string | null
   /** Local UTC offset in minutes, read once from `date +%z`. */
