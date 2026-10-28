@@ -77,7 +77,7 @@ function blocksOf(events: readonly ChatEvent[]): Block[] {
 function stepHtml(step: Step, tzMinutes: number): string {
   switch (step.kind) {
     case 'assistant':
-      return `<div class="step text">${escapeHtml(step.text)}</div>`
+      return `<div class="step text md">${escapeHtml(step.text)}</div>`
     case 'tool':
       return `<div class="step tool"><b>${escapeHtml(step.name)}</b>(<code>${escapeHtml(step.summary)}</code>) ${clockOf(step.ts, tzMinutes)}</div>`
     case 'result':
@@ -107,7 +107,7 @@ function replyHtml(steps: readonly Step[], turn: Turn | undefined, tzMinutes: nu
   return [
     `<div class="msg reply"><div class="who">Claude ${clockOf(ts, tzMinutes)}</div>`,
     details,
-    answer ? `<div class="text">${escapeHtml(answer.text)}</div>` : '',
+    answer ? `<div class="text md">${escapeHtml(answer.text)}</div>` : '',
     note ? `<p class="warn">⚠ ${escapeHtml(note)}</p>` : '',
     '</div>',
   ].join('')
@@ -119,7 +119,7 @@ function blockHtml(block: Block, tzMinutes: number): string {
   switch (event.kind) {
     case 'user': {
       const via = event.via ? ` · ${escapeHtml(event.via)}` : ''
-      return `<div class="msg user"><div class="who">You${via} ${clockOf(event.ts, tzMinutes)}</div><div class="text">${escapeHtml(event.text)}</div></div>`
+      return `<div class="msg user"><div class="who">You${via} ${clockOf(event.ts, tzMinutes)}</div><div class="text md">${escapeHtml(event.text)}</div></div>`
     }
     case 'session':
       return `<div class="marker">▶ Session ${escapeHtml(ACTION_LABEL[event.action] ?? event.action)} · ${stamp(event.ts, tzMinutes)}</div>`
@@ -171,6 +171,11 @@ summary{cursor:pointer;color:var(--accent);font-size:13px}
 code{background:var(--code);padding:1px 4px;border-radius:4px;overflow-wrap:anywhere}
 pre.result{background:var(--code);padding:6px 10px;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0 8px}
 pre.error{color:var(--error)}.warn{color:var(--error);font-size:13px;margin:6px 0 0}
+.md.rendered{white-space:normal}.md.rendered>:first-child{margin-top:0}.md.rendered>:last-child{margin-bottom:0}
+.md.rendered :is(p,ul,ol,pre,table,blockquote){margin:6px 0}.md.rendered :is(h1,h2,h3,h4,h5,h6){font-size:1.05em;margin:12px 0 4px}
+.md.rendered pre{background:var(--code);padding:6px 10px;border-radius:6px;overflow-x:auto}.md.rendered pre code{background:none;padding:0;overflow-wrap:normal}
+.md.rendered table{border-collapse:collapse;display:block;overflow-x:auto}.md.rendered :is(th,td){border:1px solid var(--line);padding:3px 8px}
+.md.rendered blockquote{border-left:3px solid var(--line);padding-left:10px;color:var(--muted)}.md.rendered a{color:var(--accent)}
 @media (max-width:600px){.msg.user{margin-left:16px}.msg.reply{margin-right:0}}
 `
 
@@ -188,7 +193,35 @@ export function htmlHead(sorted: readonly NamedLog[], tzMinutes: number): string
   ].join('')
 }
 
-export const HTML_TAIL = '</main></body></html>\n'
+/** Pinned builds on cdnjs, checked by hash; offline, the page keeps the plain text. */
+const MARKDOWN_LIBS = [
+  ['https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.12/marked.min.js', 'sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+'],
+  ['https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js', 'sha384-JEyTNhjM6R1ElGoJns4U2Ln4ofPcqzSsynQkmEc/KGy6336qAZl70tDLufbkla+3'],
+] as const
+
+/**
+ * Renders each `.md` block's text as Markdown. Raw HTML in the text stays literal
+ * text, and DOMPurify cleans what marked makes (links included) before it lands.
+ */
+const RENDER_MARKDOWN = `(() => {
+  if (!window.marked || !window.DOMPurify) return
+  const escapes = ${JSON.stringify(ESCAPES)}
+  const literal = ({ text }) => text.replace(/[&<>"']/g, c => escapes[c])
+  marked.use({ gfm: true, breaks: true, renderer: { html: literal } })
+  for (const el of document.querySelectorAll('.md')) {
+    try {
+      el.innerHTML = DOMPurify.sanitize(marked.parse(el.textContent))
+      el.classList.add('rendered')
+    } catch { /* this block keeps its plain text */ }
+  }
+})()`
+
+export const HTML_TAIL = [
+  '</main>',
+  ...MARKDOWN_LIBS.map(([src, hash]) => `<script src="${src}" integrity="${hash}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>`),
+  `<script>${RENDER_MARKDOWN}</script>`,
+  '</body></html>\n',
+].join('\n')
 
 export function toHtml(logs: readonly NamedLog[], tzMinutes: number): string {
   const sorted = sortLogs(logs, tzMinutes)

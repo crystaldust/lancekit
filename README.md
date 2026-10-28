@@ -30,7 +30,7 @@ claude plugin install chatlog@lancekit
 - Each prompt is on disk before the model sees it; every line carries its time.
 - Options (`/config` or `pluginConfigs.chatlog` in settings): `formats` (`md+txt` | `md` | `txt`), `gitignore` (default on: the folder ignores itself), `redact` (default on: API keys, tokens, private keys, `password=` values are masked).
 - `/chatlog` shows the files being written, `/chatlog list` the recent logs, `/chatlog replay [n|name]` a side-pane replay.
-- `/chatlog gen_html` writes every log to `.claude/chatlog/chatlog.html`, oldest session first (by each log's first event, so moving or renaming the folder does not reorder it). Each reply shows its last words; the tool calls, result previews and text before them fold into a closed `<details>`. Logs over 4 MiB are skipped and named.
+- `/chatlog gen_html` writes every log to `.claude/chatlog/chatlog.html`, oldest session first (by each log's first event, so moving or renaming the folder does not reorder it). Each reply shows its last words; the tool calls, result previews and text before them fold into a closed `<details>`. Prompts and answers render as Markdown with pinned, hash-checked `marked` and `DOMPurify` from cdnjs (raw HTML in the text stays literal); offline, the page shows the plain text. Logs over 4 MiB are skipped and named.
 - In a terminal: `python3 plugins/chatlog/scripts/chatlog_replay.py [n|path] [--list] [--play] [--follow] [--no-color]`.
 
 ## Layout

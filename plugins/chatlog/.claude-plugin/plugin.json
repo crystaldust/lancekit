@@ -1,6 +1,6 @@
 {
   "name": "chatlog",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Records every prompt, answer and tool call of a Claude Code session to .claude/chatlog in real time (Markdown + text + JSONL), including interrupts, exits, /clear and resume, and replays a log in terminal style",
   "author": {
     "name": "crystaldust",

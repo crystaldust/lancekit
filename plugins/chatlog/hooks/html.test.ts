@@ -107,3 +107,22 @@ test('leaves a reply without steps unfolded', () => {
   expect(detailsOf(html)).toEqual([])
   expect(html).toContain('Hello.')
 })
+
+test('marks prompts and answers as Markdown, never tool output, and loads pinned checked renderers', () => {
+  const html = toHtml([{ name: 'log', events: turnEvents }], CST)
+
+  expect(html.match(/class="[^"]*\bmd\b/g)?.length).toBe(3)
+  expect(html).toContain('<div class="text md">list files</div>')
+  expect(html).toContain('<div class="text md">Three files: a, b and c.</div>')
+  expect(html).toContain('<div class="step text md">Checking the folder.</div>')
+  expect(html).not.toMatch(/<pre class="[^"]*\bmd\b/)
+
+  const scripts = html.match(/<script src="[^"]+"[^>]*>/g) ?? []
+  expect(scripts.length).toBe(2)
+  for (const tag of scripts) {
+    expect(tag).toMatch(/src="https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/[a-z]+\/\d+\.\d+\.\d+\//)
+    expect(tag).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/)
+  }
+  expect(html).toContain('DOMPurify.sanitize(marked.parse(el.textContent))')
+  expect(html.indexOf('</main>')).toBeLessThan(html.indexOf('<script'))
+})
