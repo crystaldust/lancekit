@@ -3,7 +3,7 @@ import type { ChatEvent, SessionAction } from '../types'
 /** Width of the `[HH:MM:SS] ` time column in the text log; continuation lines indent to it. */
 const GUTTER = ' '.repeat(11)
 
-const ACTION_LABEL: Record<SessionAction, string> = {
+export const ACTION_LABEL: Record<SessionAction, string> = {
   start: 'started',
   resume: 'resumed',
   clear: 'started after /clear',

@@ -24,6 +24,7 @@ Replay output is for the person's eyes, not yours. Offer both ways and let them 
    ```
 
    Flags: `--play [--speed 4]` replays with the session's own pacing, `--follow` tails a live log, `--no-color` for plain text.
+3. **In a browser**: they run `/chatlog gen_html`, which writes every log to `.claude/chatlog/chatlog.html` (oldest session first, each reply's tool calls and results folded), then open that file.
 
 ## Answer questions about a past session
 

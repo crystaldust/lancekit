@@ -7,7 +7,7 @@ A Claude Code plugin marketplace: extensions for the
 |---|---|---|
 | [`ecc-progress`](plugins/ecc-progress) | mod (function hooks) | Side pane with PRD milestones and live `/prp-implement` task / phase progress; `/ecc-progress` opens it |
 | [`ecc-doc-check`](plugins/ecc-doc-check) | skill | Read-only audit of PRDs, PRP-PRDs and plans for status drift, invalid statuses, broken or archived links and orphan plans |
-| [`chatlog`](plugins/chatlog) | mod + skill + script | Writes every prompt, answer and tool call to `.claude/chatlog/` as it happens (Markdown, text, JSONL), with interrupts, exits, `/clear`, compaction and resume; `/chatlog replay` and `scripts/chatlog_replay.py` replay a log in terminal style |
+| [`chatlog`](plugins/chatlog) | mod + skill + script | Writes every prompt, answer and tool call to `.claude/chatlog/` as it happens (Markdown, text, JSONL), with interrupts, exits, `/clear`, compaction and resume; `/chatlog replay` and `scripts/chatlog_replay.py` replay a log in terminal style; `/chatlog gen_html` exports every log to one HTML page |
 
 ## Requirements
 
@@ -30,6 +30,7 @@ claude plugin install chatlog@lancekit
 - Each prompt is on disk before the model sees it; every line carries its time.
 - Options (`/config` or `pluginConfigs.chatlog` in settings): `formats` (`md+txt` | `md` | `txt`), `gitignore` (default on: the folder ignores itself), `redact` (default on: API keys, tokens, private keys, `password=` values are masked).
 - `/chatlog` shows the files being written, `/chatlog list` the recent logs, `/chatlog replay [n|name]` a side-pane replay.
+- `/chatlog gen_html` writes every log to `.claude/chatlog/chatlog.html`, oldest session first (by each log's first event, so moving or renaming the folder does not reorder it). Each reply shows its last words; the tool calls, result previews and text before them fold into a closed `<details>`. Logs over 4 MiB are skipped and named.
 - In a terminal: `python3 plugins/chatlog/scripts/chatlog_replay.py [n|path] [--list] [--play] [--follow] [--no-color]`.
 
 ## Layout
@@ -38,7 +39,7 @@ claude plugin install chatlog@lancekit
 .claude-plugin/marketplace.json   # the lancekit marketplace
 plugins/ecc-progress/             # mod: hooks/register.tsx, hooks/parse.ts, tests
 plugins/ecc-doc-check/            # skill: skills/prd-plan-audit (SKILL.md, scripts/, tests/)
-plugins/chatlog/                  # mod: hooks/ (register, events, render, redact, tests); scripts/ replay; skills/chatlog-replay
+plugins/chatlog/                  # mod: hooks/ (register, events, render, html, redact, tests); scripts/ replay; skills/chatlog-replay
 docs/ecc-doc-formats.md           # ECC formats both plugins depend on
 ```
 

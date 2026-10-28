@@ -3,6 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ChatEvent, LogState, SessionAction } from '../types'
 import { eventsFromRow } from './events'
+import { HTML_TAIL, htmlHead, plural, sessionHtml, sortLogs } from './html'
+import type { NamedLog } from './html'
 import { redactEvent } from './redact'
 import {
   fileStamp,
@@ -19,6 +21,9 @@ import {
 const LOG_SUBDIR = '.claude/chatlog'
 const PANE = 'chatlog-replay'
 const RECENT = 15
+const HTML_FILE = 'chatlog.html'
+/** `$.fs.read` rejects anything larger. */
+const MAX_READ_BYTES = 4 * 1024 * 1024
 const SOURCE_ACTION: Record<string, SessionAction> = {
   startup: 'start',
   resume: 'resume',
@@ -29,7 +34,7 @@ const SOURCE_ACTION: Record<string, SessionAction> = {
 
 type $ = EngineInterface
 type Settings = { md: boolean; txt: boolean; gitignore: boolean; redact: boolean }
-type LogFile = { name: string; mtimeMs: number }
+type LogFile = { name: string; mtimeMs: number; size: number }
 
 const EMPTY_LOG: LogState = { base: null, sessionId: null, tzMinutes: null }
 const logAtom = atom({ plugin: 'chatlog', key: 'log' } as const, EMPTY_LOG)
@@ -83,7 +88,7 @@ async function listLogs($: $, dir: string): Promise<LogFile[]> {
   if (!(await $.fs.exists(dir))) return []
   return (await $.fs.list(dir))
     .filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl'))
-    .map(entry => ({ name: entry.name.slice(0, -'.jsonl'.length), mtimeMs: entry.mtimeMs }))
+    .map(entry => ({ name: entry.name.slice(0, -'.jsonl'.length), mtimeMs: entry.mtimeMs, size: entry.size }))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
@@ -126,8 +131,10 @@ async function currentBase($: $, settings: Settings): Promise<string> {
   return openLog($, settings, 'start', sessionId)
 }
 
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
 function reportFailure($: $, error: unknown): void {
-  $.ui.toast(`chatlog: ${error instanceof Error ? error.message : String(error)}`)
+  $.ui.toast(`chatlog: ${errorText(error)}`)
 }
 
 function record($: $, settings: Settings, events: ChatEvent[]): Promise<void> {
@@ -171,6 +178,55 @@ async function replay($: $, target: string | undefined): Promise<string> {
   ].join('\n')
 }
 
+type Rendered = { log: NamedLog; html: string }
+/** Why a log was left out of the page: its name and the reason. */
+type Skip = string
+
+async function readLog($: $, dir: string, file: LogFile): Promise<NamedLog | Skip> {
+  if (file.size > MAX_READ_BYTES) return `${file.name} (over 4 MiB)`
+  try {
+    return { name: file.name, events: parseLog(await $.fs.read(`${dir}/${file.name}.jsonl`)) }
+  } catch (error) {
+    return `${file.name} (${errorText(error)})`
+  }
+}
+
+function renderLog(log: NamedLog, tz: number): Rendered | Skip {
+  try {
+    return { log, html: sessionHtml(log, tz) }
+  } catch (error) {
+    return `${log.name} (${errorText(error)})`
+  }
+}
+
+const isSkip = (value: unknown): value is Skip => typeof value === 'string'
+
+/**
+ * Writes every log into one HTML page, oldest session first. Every session is
+ * rendered before the first write, so a bad log is skipped rather than leaving a
+ * half-written page; the page then goes to disk a session at a time, since it may
+ * outgrow what one `$.fs.write` takes.
+ */
+async function genHtml($: $): Promise<string> {
+  const dir = await logDir($)
+  const files = await listLogs($, dir)
+  if (files.length === 0) return `No chatlogs yet under ${dir}.`
+  const tz = await tzMinutes($)
+  const read = await Promise.all(files.map(file => readLog($, dir, file)))
+  const rendered = sortLogs(read.filter((log): log is NamedLog => !isSkip(log)), tz).map(log => renderLog(log, tz))
+  const pages = rendered.filter((page): page is Rendered => !isSkip(page))
+  const skipped = [...read, ...rendered].filter(isSkip)
+  const path = `${dir}/${HTML_FILE}`
+  await $.fs.write(path, htmlHead(pages.map(page => page.log), tz))
+  for (const page of pages) await appendFile($, path, page.html)
+  await appendFile($, path, HTML_TAIL)
+  return [
+    `Wrote ${path} (${plural(pages.length, 'session')}, oldest first).`,
+    ...(skipped.length > 0 ? [`Skipped: ${skipped.join(', ')}`] : []),
+    `Open it in a browser: open "${path}"`,
+  ].join('\n')
+}
+
 async function listText($: $): Promise<string> {
   const dir = await logDir($)
   const logs = await listLogs($, dir)
@@ -193,6 +249,7 @@ async function statusText($: $, settings: Settings): Promise<string> {
     '',
     '/chatlog list             recent logs',
     '/chatlog replay [n|name]  replay a log in a side pane (default: the most recent)',
+    `/chatlog gen_html         write every log into one HTML page (${LOG_SUBDIR}/${HTML_FILE})`,
   ].join('\n')
 }
 
@@ -202,8 +259,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'chatlog',
-      description: 'Session chatlog: where it is recorded, list logs, replay one in terminal style',
-      argumentHint: '[list | replay [n|name]]',
+      description: 'Session chatlog: where it is recorded, list logs, replay one in terminal style, export all as HTML',
+      argumentHint: '[list | replay [n|name] | gen_html]',
     })
     await tzMinutes($).catch(error => reportFailure($, error))
     return next(e)
@@ -253,6 +310,7 @@ export const register: Register = (on, options) => {
     const [sub = '', target] = e.args.trim().split(/\s+/).filter(Boolean)
     if (sub === 'list') return { text: await listText($) }
     if (sub === 'replay') return { text: await replay($, target) }
+    if (sub === 'gen_html') return { text: await genHtml($) }
     return { text: await statusText($, settings) }
   })
 

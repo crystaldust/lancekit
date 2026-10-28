@@ -108,7 +108,13 @@ function fakeDisk(on: On, { cwd = '/work/demo', touched = [] as string[] } = {})
   on('fs.list', (_, e) => ({
     value: [...files.keys()]
       .filter(file => file.startsWith(`${key(e.path ?? '')}/`))
-      .map(file => ({ name: file.split('/').pop() ?? file, kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false })),
+      .map(file => ({
+        name: file.split('/').pop() ?? file,
+        kind: 'file' as const,
+        size: files.get(file)?.length ?? 0,
+        mtimeMs: 1,
+        isLink: false,
+      })),
   }))
   on('process.run', (_, e) => {
     const done = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
@@ -193,6 +199,59 @@ test('keeps writing under the project root after a shell cd', async ($, on) => {
 
   expect(touched.length).toBeGreaterThan(0)
   expect(touched.filter(path => !path.startsWith('/work/demo/.claude/chatlog/'))).toEqual([])
+})
+
+test('/chatlog gen_html writes every log into one page, oldest session first', async ($, on) => {
+  const files = fakeDisk(on)
+  const logLines = (ts: string, text: string) =>
+    [
+      { v: 1, kind: 'session', ts, action: 'start', sessionId: 'abcdef1234567890', cwd: '/work/demo' },
+      { v: 1, kind: 'user', ts, text },
+    ].map(e => JSON.stringify(e)).join('\n')
+  files.set('.claude/chatlog/2026-10-01_090000_bbbbbbbb.jsonl', logLines('2026-10-25T01:00:00.000Z', 'second prompt'))
+  files.set('.claude/chatlog/2026-10-30_090000_aaaaaaaa.jsonl', logLines('2026-10-24T01:00:00.000Z', 'first prompt'))
+  files.set('.claude/chatlog/2026-10-26_090000_cccccccc.jsonl', 'x'.repeat(4 * 1024 * 1024 + 1))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+
+  const ran = await $.command.run({
+    command: 'chatlog',
+    args: 'gen_html',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 160 },
+  })
+
+  const html = files.get('.claude/chatlog/chatlog.html') ?? ''
+  expect(ran.text).toContain('/work/demo/.claude/chatlog/chatlog.html')
+  expect(ran.text).toContain('2 sessions')
+  expect(ran.text).toContain('2026-10-26_090000_cccccccc')
+  expect(html.startsWith('<!doctype html>')).toBe(true)
+  expect(html.trimEnd().endsWith('</html>')).toBe(true)
+  expect(html.indexOf('first prompt')).toBeGreaterThan(-1)
+  expect(html.indexOf('first prompt')).toBeLessThan(html.indexOf('second prompt'))
+})
+
+test('/chatlog gen_html skips a log it cannot render and still finishes the page', async ($, on) => {
+  const files = fakeDisk(on)
+  const good = { v: 1, kind: 'user', ts: '2026-10-24T01:00:00.000Z', text: 'good prompt' }
+  const bad = { v: 1, kind: 'user', ts: '2026-10-25T01:00:00.000Z', text: 123 }
+  files.set('.claude/chatlog/2026-10-24_090000_aaaaaaaa.jsonl', JSON.stringify(good))
+  files.set('.claude/chatlog/2026-10-25_090000_dddddddd.jsonl', JSON.stringify(bad))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+
+  const ran = await $.command.run({
+    command: 'chatlog',
+    args: 'gen_html',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 160 },
+  })
+
+  const html = files.get('.claude/chatlog/chatlog.html') ?? ''
+  expect(ran.text).toContain('1 session')
+  expect(ran.text).toContain('2026-10-25_090000_dddddddd')
+  expect(html).toContain('good prompt')
+  expect(html.trimEnd().endsWith('</html>')).toBe(true)
 })
 
 test('/chatlog replay draws a log in terminal style, on every surface', async ($, on) => {
