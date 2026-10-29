@@ -2,6 +2,9 @@ import type { Milestone, MilestoneStatus, PlanTask } from '../types'
 
 const SEPARATOR = /^\|[\s:|-]+\|?$/
 const NAME_HEADER = /^(phase|milestone)$/i
+const PLAN_HEADER = /^(prp\s+)?plan$/i
+const LINK_TARGET = /\]\(([^)\s]+)\)/g
+const BARE_PLAN = /[^\s|()[\]]+\.plan\.md/g
 const TASK_HEADING = /^###\s+Task\s+(\d+)\s*[:：.\-—]?\s*(.*)$/gim
 const DONE_LOG = /\[done\]\s*Task\s+(\d+)/gi
 
@@ -41,16 +44,37 @@ export function parseMilestones(markdown: string): Milestone[] {
     const nameAt = header.findIndex(cell => NAME_HEADER.test(cell))
     if (statusAt < 0 || nameAt < 0) continue
     const numberAt = header.findIndex(cell => cell === '#')
+    const planAt = header.findIndex(cell => PLAN_HEADER.test(cell))
     return rowsAfter(lines, i + 2).map((line, index) => {
       const cells = cellsOf(line)
       return {
         n: numberAt >= 0 ? cells[numberAt] ?? String(index + 1) : String(index + 1),
         name: cells[nameAt] ?? '',
         status: normalizeStatus(cells[statusAt] ?? ''),
+        plans: planAt >= 0 ? planTargets(cells[planAt] ?? '') : [],
       }
     })
   }
   return []
+}
+
+/** The plans a PRD row's plan cell names: Markdown links (`[4a](…) · [4b](…)`) or bare paths. */
+export function planTargets(cell: string): string[] {
+  const linked = [...cell.matchAll(LINK_TARGET)].map(match => (match[1] ?? '').replace(/#.*$/, ''))
+  const targets = linked.length > 0 ? linked : [...cell.matchAll(BARE_PLAN)].map(match => match[0])
+  return targets.filter(target => target.endsWith('.plan.md'))
+}
+
+/** A link target written in the file at `fromFile`, as a path from the project root. */
+export function resolveLink(fromFile: string, target: string): string {
+  if (target.startsWith('/') || target.startsWith('.claude/')) return target
+  return target
+    .split('/')
+    .reduce<string[]>(
+      (parts, part) => (part === '..' ? parts.slice(0, -1) : part === '.' || part === '' ? parts : [...parts, part]),
+      fromFile.split('/').slice(0, -1),
+    )
+    .join('/')
 }
 
 export function parseTitle(markdown: string, fallback: string): string {

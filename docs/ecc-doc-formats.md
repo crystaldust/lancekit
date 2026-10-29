@@ -31,5 +31,5 @@ from `in-progress` to `complete` and adds the report path when it finishes.
 
 | Plugin | Reads |
 |---|---|
-| ecc-progress | newest PRD table, active plan's task headings, `completed/` archive, `[done] Task N` log lines |
+| ecc-progress | newest PRD table (its `Plan` / `PRP Plan` links pick the plan shown while idle), active plan's task headings, `completed/` archive, `[done] Task N` log lines |
 | ecc-doc-check | all PRDs and plans in both layouts, plan links, `Source PRD`, reports, git log |

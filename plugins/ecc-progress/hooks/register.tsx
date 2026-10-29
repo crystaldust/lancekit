@@ -1,13 +1,16 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { CommandPresentation, EngineInterface, Register, UiOpenResult } from 'claude-code'
 
 import type { LiveProgress, Milestone, PlanProgress, PrdProgress } from '../types'
-import { baseName, parseDoneTasks, parseMilestones, parseTasks, parseTitle } from './parse'
+import { baseName, parseDoneTasks, parseMilestones, parseTasks, parseTitle, resolveLink } from './parse'
 
 const PANE = 'ecc-progress'
 const TITLE = 'ECC Progress'
+const TITLE_NAME_CHARS = 32
 const TOOL = 'mcp__ecc-progress__report'
 const REFRESH_MS = 4000
+/** The fullscreen layout docks a pane beside the transcript from this width. */
+const DOCK_COLUMNS = 110
 const PRD_DIRS = ['.claude/PRPs/prds', '.claude/prds']
 const PLAN_DIR = '.claude/PRPs/plans'
 const ARCHIVE_DIR = `${PLAN_DIR}/completed`
@@ -59,12 +62,37 @@ async function loadPrd($: $): Promise<PrdProgress | null> {
   }
 }
 
-/** The plan /prp-implement was started on, else the newest open plan, else the newest archived one. */
-async function locatePlan($: $, live: LiveProgress) {
+const isArchivedPath = (path: string) => path.includes('/completed/')
+
+/** The plan the PRD points at next: an open plan linked from an in-progress phase, else from a pending one. */
+async function nextPlanOf($: $, prd: PrdProgress): Promise<string | undefined> {
+  const phases = [
+    ...prd.milestones.filter(m => m.status === 'in-progress'),
+    ...prd.milestones.filter(m => m.status === 'pending'),
+  ]
+  const candidates = phases
+    .flatMap(m => m.plans.map(target => resolveLink(prd.file, target)))
+    .filter(path => !isArchivedPath(path))
+  for (const path of candidates) {
+    if (await $.fs.exists(path)) return path
+  }
+  return undefined
+}
+
+/**
+ * The plan /prp-implement was started on; else what the PRD points at next (the
+ * PRD alone when it points at no open plan); without a PRD, the newest open plan,
+ * else the newest archived one.
+ */
+async function locatePlan($: $, live: LiveProgress, prd: PrdProgress | null) {
   if (live.planPath) {
-    if (await $.fs.exists(live.planPath)) return { path: live.planPath, isArchived: false }
+    if (await $.fs.exists(live.planPath)) return { path: live.planPath, isArchived: isArchivedPath(live.planPath) }
     const archived = `${ARCHIVE_DIR}/${baseName(live.planPath)}`
     if (await $.fs.exists(archived)) return { path: archived, isArchived: true }
+  }
+  if (prd) {
+    const next = await nextPlanOf($, prd)
+    return next ? { path: next, isArchived: false } : undefined
   }
   const open = await newestFile($, PLAN_DIR, '.plan.md')
   if (open) return { path: open.path, isArchived: false }
@@ -72,8 +100,8 @@ async function locatePlan($: $, live: LiveProgress) {
   return archived ? { path: archived.path, isArchived: true } : undefined
 }
 
-async function loadPlan($: $, live: LiveProgress): Promise<PlanProgress | null> {
-  const located = await locatePlan($, live)
+async function loadPlan($: $, live: LiveProgress, prd: PrdProgress | null): Promise<PlanProgress | null> {
+  const located = await locatePlan($, live, prd)
   if (!located) return null
   const text = await $.fs.read(located.path)
   return {
@@ -99,7 +127,8 @@ function statusText(prd: PrdProgress | null, plan: PlanProgress | null, live: Li
 
 async function refresh($: $) {
   const live = await read($, liveAtom)
-  const [prd, plan] = await Promise.all([loadPrd($), loadPlan($, live)])
+  const prd = await loadPrd($)
+  const plan = await loadPlan($, live, prd)
   if (!same(prd, await read($, prdAtom))) await update($, prdAtom, () => prd)
   if (!same(plan, await read($, planAtom))) await update($, planAtom, () => plan)
   // Only the run's own plan reaching the archive ends the run, not an older archived plan.
@@ -116,12 +145,41 @@ async function refresh($: $) {
   $.ui.status(statusText(prd, plan, await read($, liveAtom)))
 }
 
-/** Without a path argument, /prp-implement runs the newest open plan; remember it so its archiving ends the run. */
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
+
+/** Opens the pane, its tab naming the plan shown (else the PRD), so two projects' panes tell apart. */
+async function openPane($: $): Promise<UiOpenResult> {
+  const name = (await read($, planAtom))?.name ?? (await read($, prdAtom))?.title
+  return $.ui.open({ id: PANE, title: name ? `${TITLE} · ${clip(name, TITLE_NAME_CHARS)}` : TITLE })
+}
+
+/** The /ecc-progress answer: where the pane went, or why it is not shown. */
+function openedText(opened: UiOpenResult, where: CommandPresentation): string {
+  if (!opened.isPlaced) return `ECC progress pane not shown: ${opened.reason}`
+  if (where.isFullscreen && where.columns >= DOCK_COLUMNS) return 'ECC progress pane opened on the right.'
+  const why = where.isFullscreen
+    ? `the terminal is ${where.columns} columns`
+    : 'this session draws on the main screen (fullscreen layout off, as under tmux)'
+  return `ECC progress pane opened above the prompt: ${why}; it docks on the right in the fullscreen layout at ${DOCK_COLUMNS}+ columns.`
+}
+
+/**
+ * Without a path argument, /prp-implement runs the plan the PRD points at next,
+ * else the newest open plan; remember it so its archiving ends the run.
+ */
 async function startRun($: $, args: string) {
-  const planPath = args.trim().split(/\s+/)[0] || (await newestFile($, PLAN_DIR, '.plan.md'))?.path || null
+  const prd = await loadPrd($)
+  const planPath =
+    args.trim().split(/\s+/)[0] ||
+    (prd ? await nextPlanOf($, prd) : undefined) ||
+    (await newestFile($, PLAN_DIR, '.plan.md'))?.path ||
+    null
   await update($, liveAtom, () => ({ ...IDLE, planPath, phase: 'DETECT', isActive: true }))
   await refresh($)
-  void $.ui.open({ id: PANE, title: TITLE })
+  const opened = await openPane($)
+  if (!opened.isPlaced) {
+    $.ui.toast(`ECC progress pane not shown (${opened.reason}); type /ecc-progress to open it`)
+  }
 }
 
 async function markDone($: $, tasks: number[]) {
@@ -161,6 +219,21 @@ const COLOR = { complete: 'green', 'in-progress': 'yellow', pending: undefined, 
 const UNFINISHED = new Set<Milestone['status']>(['pending', 'in-progress'])
 
 export const register: Register = on => {
+  /** Whether the surface docks panes beside the transcript, as the prompt band's drawing last said. */
+  let isFullscreen: boolean | undefined
+  /** The session started with work to show; opened on a refresh once the layout is known to dock it. */
+  let wantsAutoOpen = false
+
+  /**
+   * True once, when the pane should open unasked: only where it becomes a
+   * sidebar, since inline on the main screen it would crowd the prompt.
+   */
+  const takeAutoOpen = () => {
+    if (!wantsAutoOpen || isFullscreen !== true) return false
+    wantsAutoOpen = false
+    return true
+  }
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'ecc-progress',
@@ -180,17 +253,26 @@ export const register: Register = on => {
         },
       },
     })
-    $.clock.every(REFRESH_MS, () => void refresh($))
+    $.clock.every(REFRESH_MS, async () => {
+      await refresh($)
+      if (takeAutoOpen()) await openPane($)
+    })
     await refresh($)
     const hasOpenMilestone = (await read($, prdAtom))?.milestones.some(m => UNFINISHED.has(m.status)) ?? false
-    if ((await read($, liveAtom)).isActive || hasOpenMilestone) void $.ui.open({ id: PANE, title: TITLE })
+    wantsAutoOpen = (await read($, liveAtom)).isActive || hasOpenMilestone
+    if (takeAutoOpen()) await openPane($)
     return next(e)
   })
 
-  on('command.run', { command: 'ecc-progress' }, async $ => {
+  // Draws nothing: `session.start` carries no layout, so the prompt band's drawing reports it.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    isFullscreen = e.viewport?.isFullscreen
+    return next(e)
+  })
+
+  on('command.run', { command: 'ecc-progress' }, async ($, e) => {
     await refresh($)
-    await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'ECC progress pane opened.' }
+    return { text: openedText(await openPane($), e.presentation) }
   })
 
   on('prompt.submit', async ($, e, next) => {
