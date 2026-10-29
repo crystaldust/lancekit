@@ -118,7 +118,8 @@ function statusText(prd: PrdProgress | null, plan: PlanProgress | null, live: Li
   const parts: string[] = []
   if (prd && prd.milestones.length > 0) {
     const done = prd.milestones.filter(m => m.status === 'complete').length
-    parts.push(`M${done}/${prd.milestones.length}`)
+    const running = prd.milestones.filter(m => m.status === 'in-progress').map(m => m.n)
+    parts.push(`M${done}/${prd.milestones.length}${running.length > 0 ? ` ▶${running.join(',')}` : ''}`)
   }
   if (plan && plan.tasks.length > 0 && live.isActive) parts.push(`T${live.doneTasks.length}/${plan.tasks.length}`)
   if (live.isActive && live.phase) parts.push(live.phase)
@@ -147,10 +148,16 @@ async function refresh($: $) {
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 
-/** Opens the pane, its tab naming the plan shown (else the PRD), so two projects' panes tell apart. */
+/**
+ * Opens the pane, its tab naming the plan shown (else the PRD), so two projects' panes tell apart.
+ * Then asks for a drawing: a pane restored on resume can be up before the plugin first drew it,
+ * and unchanged progress would never draw it again.
+ */
 async function openPane($: $): Promise<UiOpenResult> {
   const name = (await read($, planAtom))?.name ?? (await read($, prdAtom))?.title
-  return $.ui.open({ id: PANE, title: name ? `${TITLE} · ${clip(name, TITLE_NAME_CHARS)}` : TITLE })
+  const opened = await $.ui.open({ id: PANE, title: name ? `${TITLE} · ${clip(name, TITLE_NAME_CHARS)}` : TITLE })
+  if (opened.isPlaced) $.ui.invalidate('ui.render')
+  return opened
 }
 
 /** The /ecc-progress answer: where the pane went, or why it is not shown. */

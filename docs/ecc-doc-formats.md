@@ -17,7 +17,8 @@ from `in-progress` to `complete` and adds the report path when it finishes.
 ## Plans
 
 - `/prp-plan` writes `.claude/PRPs/plans/{name}.plan.md`; `/plan` writes under `.claude/plans/`.
-- Tasks are headings: `### Task N: {name}` under `## Step-by-Step Tasks`.
+- Tasks are headings: `### Task N: {name}` under `## Step-by-Step Tasks`; ecc-progress also
+  reads a range, `### Task 5–12: {name}`, as tasks 5 to 12.
 - `/prp-implement` archives a finished plan to `.claude/PRPs/plans/completed/` and
   writes `.claude/PRPs/reports/{name}-report.md`.
 

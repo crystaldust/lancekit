@@ -5,7 +5,7 @@ const NAME_HEADER = /^(phase|milestone)$/i
 const PLAN_HEADER = /^(prp\s+)?plan$/i
 const LINK_TARGET = /\]\(([^)\s]+)\)/g
 const BARE_PLAN = /[^\s|()[\]]+\.plan\.md/g
-const TASK_HEADING = /^###\s+Task\s+(\d+)\s*[:：.\-—]?\s*(.*)$/gim
+const TASK_HEADING = /^###\s+Task\s+(\d+)(?:\s*[–-]\s*(\d+))?\s*[:：.\-—]?\s*(.*)$/gim
 const DONE_LOG = /\[done\]\s*Task\s+(\d+)/gi
 
 const cellsOf = (line: string): string[] =>
@@ -82,12 +82,14 @@ export function parseTitle(markdown: string, fallback: string): string {
   return heading?.[1]?.trim() || fallback
 }
 
-/** Reads the `### Task N: name` headings of a /prp-plan plan. */
+/** Reads the `### Task N: name` headings of a /prp-plan plan; `### Task 5–12: name` is tasks 5 to 12. */
 export function parseTasks(markdown: string): PlanTask[] {
-  return [...markdown.matchAll(TASK_HEADING)].map(match => ({
-    n: Number(match[1]),
-    name: (match[2] ?? '').trim(),
-  }))
+  return [...markdown.matchAll(TASK_HEADING)].flatMap(match => {
+    const first = Number(match[1])
+    const last = Math.max(first, Number(match[2] ?? first))
+    const name = (match[3] ?? '').trim()
+    return Array.from({ length: last - first + 1 }, (_, i) => ({ n: first + i, name }))
+  })
 }
 
 /** Reads the `[done] Task N` lines /prp-implement logs as it goes. */

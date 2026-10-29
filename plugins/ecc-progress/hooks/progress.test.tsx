@@ -66,6 +66,19 @@ test('reads plan tasks and the [done] log lines', () => {
   expect(parseDoneTasks('[done] Task 1: x — complete\n[done] Task 2: y')).toEqual([1, 2])
 })
 
+test('a task heading over a range counts each task in it', () => {
+  const plan = '### Task 4: Tokens\n### Task 5–7: Nine pages\n### Task 8-9: E2E\n### Task 10 — Docs'
+  expect(parseTasks(plan).map(t => `${t.n}:${t.name}`)).toEqual([
+    '4:Tokens',
+    '5:Nine pages',
+    '6:Nine pages',
+    '7:Nine pages',
+    '8:E2E',
+    '9:E2E',
+    '10:Docs',
+  ])
+})
+
 const PANE = {
   plugin: 'ecc-progress',
   component: 'Pane',
@@ -159,8 +172,17 @@ function mockProject(on: On, tree: Tree, placed: UiOpenResult = PLACED) {
     }
   })
   on('fs.read', (_, e) => ({ value: fileText(absolute(e.path)) ?? '' }))
+  const statuses: (string | undefined)[] = []
+  const invalidated: string[] = []
   const clock = mock.clock(on)
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', (_, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.invalidate', (_, e) => {
+    invalidated.push(e.event)
+    return { value: undefined }
+  })
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -176,7 +198,7 @@ function mockProject(on: On, tree: Tree, placed: UiOpenResult = PLACED) {
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { opened, titles, toasts, clock }
+  return { opened, titles, toasts, statuses, invalidated, clock }
 }
 
 const ABOVE_PROMPT = {
@@ -236,6 +258,24 @@ test('a PRD with unfinished phases opens the pane once the layout docks panes', 
   await clock.advance(4000)
 
   expect(opened).toContain('ecc-progress')
+})
+
+test('the status line names the phases in progress beside the completed count', async ($, on) => {
+  const { statuses } = mockProject(on, { [PRDS]: { 'checkout.prd.md': PRP_PRD } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  expect(statuses.at(-1)).toBe('ECC M1/3 ▶2')
+})
+
+test('opening the pane asks for it to be drawn, so a pane restored on resume is not left blank', async ($, on) => {
+  const { invalidated, clock } = mockProject(on, { [PRDS]: { 'checkout.prd.md': PRP_PRD } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await seeLayout($, true)
+  await clock.advance(4000)
+
+  expect(invalidated).toContain('ui.render')
 })
 
 test('on the main screen a PRD with unfinished phases leaves the pane closed', async ($, on) => {
