@@ -59,15 +59,17 @@ async function loadPrd($: $): Promise<PrdProgress | null> {
   }
 }
 
-/** The plan /prp-implement was started on, else the newest open plan. */
+/** The plan /prp-implement was started on, else the newest open plan, else the newest archived one. */
 async function locatePlan($: $, live: LiveProgress) {
   if (live.planPath) {
     if (await $.fs.exists(live.planPath)) return { path: live.planPath, isArchived: false }
     const archived = `${ARCHIVE_DIR}/${baseName(live.planPath)}`
     if (await $.fs.exists(archived)) return { path: archived, isArchived: true }
   }
-  const newest = await newestFile($, PLAN_DIR, '.plan.md')
-  return newest ? { path: newest.path, isArchived: false } : undefined
+  const open = await newestFile($, PLAN_DIR, '.plan.md')
+  if (open) return { path: open.path, isArchived: false }
+  const archived = await newestFile($, ARCHIVE_DIR, '.plan.md')
+  return archived ? { path: archived.path, isArchived: true } : undefined
 }
 
 async function loadPlan($: $, live: LiveProgress): Promise<PlanProgress | null> {
@@ -90,7 +92,7 @@ function statusText(prd: PrdProgress | null, plan: PlanProgress | null, live: Li
     const done = prd.milestones.filter(m => m.status === 'complete').length
     parts.push(`M${done}/${prd.milestones.length}`)
   }
-  if (plan && live.isActive) parts.push(`T${live.doneTasks.length}/${plan.tasks.length}`)
+  if (plan && plan.tasks.length > 0 && live.isActive) parts.push(`T${live.doneTasks.length}/${plan.tasks.length}`)
   if (live.isActive && live.phase) parts.push(live.phase)
   return parts.length > 0 ? `ECC ${parts.join(' · ')}` : undefined
 }
@@ -100,7 +102,9 @@ async function refresh($: $) {
   const [prd, plan] = await Promise.all([loadPrd($), loadPlan($, live)])
   if (!same(prd, await read($, prdAtom))) await update($, prdAtom, () => prd)
   if (!same(plan, await read($, planAtom))) await update($, planAtom, () => plan)
-  if (live.isActive && plan?.isArchived) {
+  // Only the run's own plan reaching the archive ends the run, not an older archived plan.
+  const isRunPlan = live.planPath !== null && plan !== null && baseName(plan.file) === baseName(live.planPath)
+  if (live.isActive && plan?.isArchived && isRunPlan) {
     await update($, liveAtom, now => ({
       ...now,
       doneTasks: plan.tasks.map(task => task.n),
@@ -112,8 +116,9 @@ async function refresh($: $) {
   $.ui.status(statusText(prd, plan, await read($, liveAtom)))
 }
 
+/** Without a path argument, /prp-implement runs the newest open plan; remember it so its archiving ends the run. */
 async function startRun($: $, args: string) {
-  const planPath = args.trim().split(/\s+/)[0] || null
+  const planPath = args.trim().split(/\s+/)[0] || (await newestFile($, PLAN_DIR, '.plan.md'))?.path || null
   await update($, liveAtom, () => ({ ...IDLE, planPath, phase: 'DETECT', isActive: true }))
   await refresh($)
   void $.ui.open({ id: PANE, title: TITLE })
@@ -153,6 +158,7 @@ const textOf = (content: unknown): string =>
 
 const MARK = { complete: '✓', 'in-progress': '▶', pending: '·', unknown: '?' } as const
 const COLOR = { complete: 'green', 'in-progress': 'yellow', pending: undefined, unknown: undefined } as const
+const UNFINISHED = new Set<Milestone['status']>(['pending', 'in-progress'])
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -176,7 +182,8 @@ export const register: Register = on => {
     })
     $.clock.every(REFRESH_MS, () => void refresh($))
     await refresh($)
-    if ((await read($, liveAtom)).isActive) void $.ui.open({ id: PANE, title: TITLE })
+    const hasOpenMilestone = (await read($, prdAtom))?.milestones.some(m => UNFINISHED.has(m.status)) ?? false
+    if ((await read($, liveAtom)).isActive || hasOpenMilestone) void $.ui.open({ id: PANE, title: TITLE })
     return next(e)
   })
 
@@ -262,10 +269,16 @@ export const register: Register = on => {
               Plan {plan.name}
               {plan.isArchived ? ' (archived)' : ''}
             </Text>
-            <Text dimColor>
-              {bar(tasksDone, plan.tasks.length)}
-              {live.phase ? `  ${live.phase}` : ''}
-            </Text>
+            {plan.tasks.length > 0 ? (
+              <Text dimColor>
+                {bar(tasksDone, plan.tasks.length)}
+                {live.phase ? `  ${live.phase}` : ''}
+              </Text>
+            ) : (
+              <Text dimColor>
+                No `### Task N:` headings in this plan{live.phase ? `  ${live.phase}` : ''}
+              </Text>
+            )}
             {plan.tasks.map(task => (
               <Text
                 color={taskMark(task.n) === '✓' ? 'green' : taskMark(task.n) === '▶' ? 'yellow' : undefined}

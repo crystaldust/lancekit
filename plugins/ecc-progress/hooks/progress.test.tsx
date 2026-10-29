@@ -109,3 +109,108 @@ test('a report from the model marks plan tasks in the pane', async ($, on) => {
     await ui.unmount()
   }
 })
+
+const PLANS = '/.claude/PRPs/plans'
+const ARCHIVE = `${PLANS}/completed`
+const PRDS = '/.claude/PRPs/prds'
+
+/** A project tree: each directory's files (newest first) and their text. */
+type Tree = Record<string, Record<string, string>>
+
+/** The engine resolves the plugin's relative paths against the session cwd; keep the project-relative tail. */
+const absolute = (path: unknown) => {
+  const text = String(path)
+  return text.slice(Math.max(0, text.indexOf('/.claude')))
+}
+const split = (path: string) => [path.slice(0, path.lastIndexOf('/')), path.slice(path.lastIndexOf('/') + 1)] as const
+
+function mockProject(on: Parameters<Parameters<typeof test>[1]>[1], tree: Tree) {
+  const opened: string[] = []
+  const fileText = (path: string) => {
+    const [dir, name] = split(path)
+    return tree[dir]?.[name]
+  }
+  on('command.register', () => ({ value: { command: 'ecc-progress' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__ecc-progress__report' } }))
+  on('fs.exists', (_, e) => {
+    const path = absolute(e.path)
+    return { value: path in tree || fileText(path) !== undefined }
+  })
+  on('fs.list', (_, e) => {
+    const names = Object.keys(tree[absolute(e.path)] ?? {})
+    return {
+      value: names.map((name, index) => ({ name, kind: 'file', size: 1, mtimeMs: names.length - index, isLink: false })),
+    }
+  })
+  on('fs.read', (_, e) => ({ value: fileText(absolute(e.path)) ?? '' }))
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', (_, e) => {
+    opened.push(String(e.id))
+    return { value: { isPlaced: true } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  return { opened }
+}
+
+const DONE_PRD = PRP_PRD.replace(/in-progress|pending/g, 'complete')
+
+test('with every plan archived, the pane shows the newest archived plan', async ($, on) => {
+  mockProject(on, {
+    [PLANS]: {},
+    [ARCHIVE]: { 'cart-api.plan.md': PLAN, 'older.plan.md': '# Plan: Older\n### Task 1: Old' },
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Plan Feature: Cart API \(archived\)/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /T2 / }))?.text).toBe('✓ T2 Add routes')
+  await ui.unmount()
+})
+
+test('a PRD with unfinished phases opens the pane at session start', async ($, on) => {
+  const { opened } = mockProject(on, { [PRDS]: { 'checkout.prd.md': PRP_PRD } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  expect(opened).toContain('ecc-progress')
+})
+
+test('a PRD with every phase complete leaves the pane closed', async ($, on) => {
+  const { opened } = mockProject(on, { [PRDS]: { 'checkout.prd.md': DONE_PRD } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  expect(opened).not.toContain('ecc-progress')
+})
+
+test('a plan without task headings says so instead of an empty 0/0', async ($, on) => {
+  mockProject(on, { [PLANS]: { 'lite.plan.md': '# Plan: Lite\n\n## Files to Change\n' } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /No `### Task N:` headings/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0\/0/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a run started without a plan path follows the newest open plan into the archive', async ($, on) => {
+  const tree: Tree = {
+    [PLANS]: { 'cart-api.plan.md': PLAN },
+    [ARCHIVE]: { 'older.plan.md': '# Plan: Older\n### Task 1: Old' },
+  }
+  mockProject(on, tree)
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '/prp-implement', command: { name: 'prp-implement', args: '' } })
+  tree[ARCHIVE] = { 'cart-api.plan.md': PLAN, ...tree[ARCHIVE] }
+  tree[PLANS] = {}
+  await $.tool.call({ tool: 'mcp__ecc-progress__report', phase: 'report' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /3\/3\s+DONE/ })).toBeDefined()
+  await ui.unmount()
+})
