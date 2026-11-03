@@ -157,8 +157,8 @@ lancekit 新增插件 `session-board`，由两部分组成：
 | # | Phase | Description | Status | Parallel | Depends | PRP Plan |
 |---|-------|-------------|--------|----------|---------|----------|
 | 1 | 状态契约与看板服务 | 定稿会话状态 JSON 契约；Python 看板服务：令牌校验、接收上报、汇总、失联判定、`GET /api/sessions` | complete | - | - | .claude/PRPs/plans/completed/session-board-server.plan.md · report: .claude/PRPs/reports/session-board-server-report.md |
-| 2 | 会话上报 mod | 从事件推导状态、读取 ecc-progress 进度、状态变化即时上报加心跳、`userConfig`、`/session-board` 连接状态 | pending | with 3 | 1 | - |
-| 3 | 大屏页面 | 先出页面设计，再实现：按等待排序的会话卡片、高亮、等待时长、最后交代和回答、ECC 进度 | pending | with 2 | 1 | - |
+| 2 | 会话上报 mod | 从事件推导状态、读取 ecc-progress 进度、状态变化即时上报加心跳、`userConfig`、`/session-board` 连接状态 | complete | with 3 | 1 | .claude/PRPs/plans/completed/session-board-reporter.plan.md · report: .claude/PRPs/reports/session-board-reporter-report.md |
+| 3 | 大屏页面 | 先出页面设计，再实现：按等待排序的会话卡片、高亮、等待时长、最后交代和回答、ECC 进度 | in-progress | with 2 | 1 | - |
 | 4 | 端到端验收与文档 | 两台机器、约 10 个会话连续使用一天，核对 Success Metrics；README 中英文更新 | pending | - | 2, 3 | - |
 
 ### Phase Details
