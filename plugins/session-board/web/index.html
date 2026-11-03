@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session board</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6e6e73; --line: #d2d2d7; --alert: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --bg: #161617; --muted: #a1a1a6; --line: #3a3a3c; --alert: #ff6b5f; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
+  p.note { color: var(--muted); margin: 0 0 12px; }
+  p.error { color: var(--alert); font-weight: 600; margin: 0 0 12px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+</style>
+</head>
+<body>
+<p class="note">Placeholder board — Phase 3 replaces this page.</p>
+<p class="error" id="error" hidden></p>
+<table>
+  <thead><tr><th>Project</th><th>Host</th><th>State</th><th>Waiting since</th><th>Last prompt</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+  const POLL_MS = 2000;
+  const PROMPT_CHARS = 80;
+  const token = new URLSearchParams(location.search).get("token") || "";
+  const errorLine = document.getElementById("error");
+  const rows = document.getElementById("rows");
+
+  function cell(text) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    return td;
+  }
+
+  function render(sessions) {
+    rows.replaceChildren(...sessions.map(s => {
+      const tr = document.createElement("tr");
+      tr.append(
+        cell(s.project),
+        cell(s.host),
+        cell(s.isLost ? "lost" : s.state),
+        cell(new Date(s.waitingSince).toLocaleTimeString()),
+        cell(s.lastPrompt ? s.lastPrompt.text.slice(0, PROMPT_CHARS) : ""),
+      );
+      return tr;
+    }));
+  }
+
+  async function poll() {
+    try {
+      const response = await fetch("/api/sessions", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      render((await response.json()).sessions);
+      errorLine.hidden = true;
+    } catch (error) {
+      errorLine.textContent = `Cannot load sessions: ${error.message}`;
+      errorLine.hidden = false;
+    }
+  }
+
+  poll();
+  setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
