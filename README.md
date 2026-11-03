@@ -1,12 +1,14 @@
 # lancekit
 
+English | [简体中文](README.zh-CN.md)
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.304-d97757)](https://code.claude.com)
 [![ECC](https://img.shields.io/badge/ECC-2.2.3-555)](https://github.com/affaan-m/ECC)
 
 A [Claude Code](https://code.claude.com) plugin marketplace with three plugins:
 
-- Two extensions for the [ECC](https://github.com/affaan-m/ECC) workflow, `/ecc:prp-prd` → `ecc:prp-plan`→ `/ecc:prp-implement`: a live progress pane, and a consistency audit of the planning documents.
+- Two extensions for the [ECC](https://github.com/affaan-m/ECC) workflow, `/ecc:prp-prd` → `/ecc:prp-plan` → `/ecc:prp-implement`: a live progress pane, and a consistency audit of the planning documents.
 - A real-time chatlog of every session.
 
 ## Contents
