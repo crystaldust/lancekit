@@ -1,0 +1,27 @@
+{
+  "name": "session-board",
+  "version": "0.1.0",
+  "description": "Reports this Claude Code session's state (working, needs approval, your turn, ended), last prompt, last answer and ECC progress to a session-board wall display",
+  "author": {
+    "name": "crystaldust",
+    "url": "https://github.com/crystaldust"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/crystaldust/lancekit/tree/main/plugins/session-board",
+  "repository": "https://github.com/crystaldust/lancekit",
+  "userConfig": {
+    "boardUrl": {
+      "type": "string",
+      "title": "Board URL",
+      "description": "The board server's address, e.g. http://192.168.0.226:7777. You can paste the whole link board.py prints: a ?token= in it is used as the token, but it is then kept in plain settings; put the token in Token to keep it in secure storage.",
+      "default": ""
+    },
+    "token": {
+      "type": "string",
+      "title": "Token",
+      "description": "The board server's access token (--token or SESSION_BOARD_TOKEN). Leave empty when the Board URL carries ?token=.",
+      "sensitive": true,
+      "default": ""
+    }
+  }
+}
