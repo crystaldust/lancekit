@@ -180,6 +180,8 @@ It prints a link for every address it listens on, such as `http://192.168.0.226:
 
 Saving the option reloads the plugin, and the session starts reporting. `/session-board` shows the board address, this session's state and the result of its last report.
 
+**Name a session:** `/session-board name <name>` puts that name on the card in place of the project name, so two sessions in one project are easy to tell apart. The project moves to the line below. `/session-board name` with no name clears it. The name lasts until Claude Code exits, through `/clear` and option changes.
+
 **Try it without sessions:** `python3 plugins/session-board/scripts/demo.py --token <token>` pushes ten made-up sessions.
 
 **Check a day of use:** `python3 plugins/session-board/scripts/metrics.py states.jsonl` reads the record file and reports the approval wait (median, P90), the report delay and the peak number of sessions online.
