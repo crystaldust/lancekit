@@ -182,6 +182,8 @@ python3 plugins/session-board/scripts/board.py --host 0.0.0.0 --token <令牌> -
 
 **给会话起名：** `/session-board name <名称>` 让卡片显示这个名称而不是项目名，同一项目开了几个会话也能分清。项目名移到下面一行。`/session-board name` 后面不写名称就是清除。名称一直保留到退出 Claude Code，`/clear` 和改选项都不影响。
 
+**后台任务：** 一轮结束时如果还有后台任务在跑，这个会话显示为工作中，详情行写着任务情况（例如 `后台 2 个任务：shell · subagent`），先不会出现在“等你处理”里；超过 3 分钟任务还没做完，就照样转到“轮到你”（详情行仍写着任务情况），这样开着开发服务器的会话也会叫你。
+
 **没有会话时先试看：** `python3 plugins/session-board/scripts/demo.py --token <令牌>` 推送 10 个模拟会话。
 
 **核对一天的使用：** `python3 plugins/session-board/scripts/metrics.py states.jsonl` 读取记录文件，给出等批准时长（中位数、P90）、上报延迟和同时在线的会话数。

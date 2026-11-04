@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { buildReport, boardSessionId, eccSummary, parseBoardUrl, projectName, sessionUrl } from './report'
 import type { Board, EccLive, EccPlan, EccPrd, EccSummary, Where } from './report'
-import { clip, enter, initialStatus, questionDetail, sessionName, toolDetail, withAnswer, withPrompt } from './status'
+import { backgroundDetail, clip, enter, initialStatus, questionDetail, sessionName, toolDetail, withAnswer, withPrompt } from './status'
 import type { SessionState, Status } from './status'
 
 type $ = EngineInterface
@@ -15,7 +15,12 @@ const USAGE = [
   '/session-board name         清除名称',
 ].join('\n')
 
+/** Prompt origins that are the person's own words. */
+const PERSON_ORIGINS = ['composer', 'bridge', 'sdk']
+
 const HEARTBEAT_MS = 5000
+/** How long a session may stay working on background tasks alone before it asks for the person. */
+const BACKGROUND_WAIT_MS = 3 * 60_000
 /** How long an exiting session waits for its last report. */
 const END_REPORT_MS = 1500
 /** A request the board has not answered by then counts as failed; the next heartbeat tries again. */
@@ -50,6 +55,14 @@ type Reporter = {
   link: Link
   inFlight: Promise<void> | null
   isDirty: boolean
+  /** The detail line for tasks still running behind the turn that just stopped; null for none. */
+  background: string | null
+  /** Where the prompt that starts the next turn came from; null when no prompt.submit was seen. */
+  promptOrigin: { kind: string; text: string } | null
+  /** When the turn that left tasks running ended; null once the wait has run out or the tasks are gone. */
+  backgroundSince: number | null
+  /** True once the wait ran out and the session was handed back to the person with the tasks still running. */
+  backgroundExpired: boolean
 }
 
 async function readEcc($: $): Promise<EccSummary | null> {
@@ -118,6 +131,22 @@ async function apply($: $, r: Reporter, change: (status: Status, now: number) =>
   if (changed !== current) $.clock.after(0, () => send($, r))
 }
 
+/**
+ * Once tasks have run behind a finished turn for BACKGROUND_WAIT_MS, the session counts as the person's turn
+ * (a dev server never ends); the tasks stay in the detail. True when it moved.
+ */
+async function expireBackground($: $, r: Reporter): Promise<boolean> {
+  const { background, backgroundSince } = r
+  if (background === null || backgroundSince === null || r.status?.state !== 'working') return false
+  if ((await $.clock.now()) - backgroundSince < BACKGROUND_WAIT_MS) return false
+  // A turn may have started while the clock was read.
+  if (r.background !== background || r.status?.state !== 'working') return false
+  r.backgroundSince = null
+  r.backgroundExpired = true
+  await apply($, r, (s, now) => (r.background === background && s.state === 'working' ? enter(s, 'your-turn', now, background) : s))
+  return true
+}
+
 /** Sets (or, for blank text, clears) the session's name, keeps it in state and reports it at once. */
 async function rename($: $, r: Reporter, text: string): Promise<string> {
   const name = sessionName(text)
@@ -146,6 +175,10 @@ export const register: Register = (on, options) => {
     link: { attemptAt: null, okAt: null, error: null },
     inFlight: null,
     isDirty: false,
+    background: null,
+    promptOrigin: null,
+    backgroundSince: null,
+    backgroundExpired: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -155,15 +188,34 @@ export const register: Register = (on, options) => {
     r.where = { host: host || 'unknown', cwd: e.cwd, name: kept }
     r.sessionId = null
     r.status = r.status ?? initialStatus(await $.clock.now())
-    $.clock.every(HEARTBEAT_MS, () => (r.status?.state === 'ended' ? undefined : send($, r)))
+    $.clock.every(HEARTBEAT_MS, async () => {
+      if (r.status?.state === 'ended') return
+      if (await expireBackground($, r)) return
+      return send($, r)
+    })
     $.clock.after(0, () => send($, r))
     return next(e)
   })
 
+  on('prompt.submit', async ($, e, next) => {
+    r.promptOrigin = { kind: e.origin?.kind ?? 'composer', text: e.text }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
+      // Only the prompt that started this very turn counts: another may have gone into a running turn.
+      const origin = r.promptOrigin?.text === e.text ? r.promptOrigin.kind : null
+      r.promptOrigin = null
       r.approval = null
-      await apply($, r, (s, now) => withPrompt(enter(s, 'working', now), e.text, now))
+      r.background = null
+      r.backgroundSince = null
+      r.backgroundExpired = false
+      const isPerson = origin === null || PERSON_ORIGINS.includes(origin)
+      await apply($, r, (s, now) => {
+        const working = enter(s, 'working', now)
+        return isPerson ? withPrompt(working, e.text, now) : working
+      })
     }
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -197,7 +249,8 @@ export const register: Register = (on, options) => {
       (approval.tool === null || r.status.detail === detail)
     if (waitedOnThis) {
       r.approval = null
-      await apply($, r, (s, now) => enter(s, 'working', now))
+      const state = r.backgroundExpired ? 'your-turn' : 'working'
+      await apply($, r, (s, now) => enter(s, state, now, r.background))
     }
     return result
   }).catch(($, e, next) => next(e))
@@ -205,13 +258,29 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       r.approval = null
-      await apply($, r, (s, now) => withAnswer(enter(s, 'your-turn', now), e.answer, now))
+      const { background } = r
+      await apply($, r, (s, now) =>
+        withAnswer(background === null ? enter(s, 'your-turn', now) : enter(s, 'working', now, background), e.answer, now),
+      )
     }
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e, next) => {
-    await apply($, r, (s, now) => (s.state === 'working' ? enter(s, 'your-turn', now) : s))
+    const tasks = e.agent_id === undefined ? (e.background_tasks ?? []) : []
+    if (tasks.length > 0) {
+      const detail = backgroundDetail(tasks)
+      r.background = detail
+      r.backgroundSince = await $.clock.now()
+      r.backgroundExpired = false
+      r.approval = null
+      await apply($, r, (s, now) => enter(s, 'working', now, detail))
+    } else if (e.agent_id === undefined) {
+      r.background = null
+      r.backgroundSince = null
+      r.backgroundExpired = false
+      await apply($, r, (s, now) => (s.state === 'working' ? enter(s, 'your-turn', now) : s))
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -223,6 +292,10 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       // The process goes on under another id, and no session.start follows.
       r.sessionId = null
+      r.background = null
+      r.backgroundSince = null
+      r.backgroundExpired = false
+      r.promptOrigin = null
       r.status = initialStatus(await $.clock.now())
       $.clock.after(0, () => send($, r))
     }

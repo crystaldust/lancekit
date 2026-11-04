@@ -108,6 +108,7 @@
   .compact .project { font-size: 1.625rem; line-height: 1.2; }
   .compact .where { color: var(--faint); font-size: 1rem; }
   .compact .prompt { color: var(--muted); font-size: 1.125rem; line-height: 1.4; -webkit-line-clamp: 3; flex: none; }
+  .compact .detail-line { color: var(--accent); font-size: 1.125rem; display: block; -webkit-line-clamp: unset; }
   .compact .spacer { flex: 1; }
   .compact .ecc-text { font-size: 1rem; }
   .compact .track { height: 0.375rem; border-radius: 0.1875rem; background: #FFFFFF14; }
@@ -247,6 +248,13 @@
       .join(" · ");
   }
 
+  /** The compact card's text lines: a working session's detail replaces the last prompt, other kinds keep the prompt. */
+  function compactLines(session) {
+    const prompt = promptMessage(session);
+    const detail = kindOf(session) === "working" && session.detail && session.detail.trim() !== "" ? session.detail : null;
+    return { prompt: detail ? null : prompt ? prompt.lines[0] : null, detail };
+  }
+
   function promptMessage(session) {
     return session.lastPrompt && session.lastPrompt.text
       ? { label: "最后交代", kind: "prompt", lines: [session.lastPrompt.text] }
@@ -287,7 +295,7 @@
 
   globalThis.BoardLogic = Object.freeze({
     KINDS, KIND_LABELS, kindOf, split, counts, hostCount, formatTimer, formatAgo, durationText,
-    eccText, isSnapshot, shortPath, titleOf, whereText, messageOf, promptMessage, errorReason, syncText, clockText, timeText,
+    eccText, isSnapshot, shortPath, titleOf, whereText, messageOf, promptMessage, compactLines, errorReason, syncText, clockText, timeText,
   });
 })();
 </script>
@@ -407,8 +415,9 @@
     identity.append(el("div", "project ellipsis", L.titleOf(session)), el("div", "where ellipsis", L.whereText(session, false)));
     const card = el("article", `compact ${kind}`);
     card.append(stateLine, identity);
-    const prompt = L.promptMessage(session);
-    if (prompt) card.append(el("div", "prompt", prompt.lines[0]));
+    const lines = L.compactLines(session);
+    if (lines.detail) card.append(el("div", "prompt detail-line ellipsis", lines.detail));
+    else if (lines.prompt) card.append(el("div", "prompt", lines.prompt));
     card.append(el("div", "spacer"));
     const ecc = eccBlock(session, false);
     if (ecc) card.append(ecc);

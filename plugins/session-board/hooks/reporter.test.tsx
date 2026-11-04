@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { HttpResponse, On } from 'claude-code'
 
-import { answerTail, clip, sessionName, toolDetail } from './status'
+import { answerTail, backgroundDetail, clip, sessionName, toolDetail } from './status'
 import { boardSessionId, eccSummary, parseBoardUrl } from './report'
 
 const BOARD = { options: { boardUrl: 'http://board.lan:7777/?token=secret', token: '' } }
@@ -54,6 +54,7 @@ function world(on: On): World {
   })
   on('command.register', () => ({ value: { command: 'session-board' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => e)
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
@@ -447,4 +448,254 @@ test('a name of only hidden characters is cleared, and the reply says why', BOAR
   await start($, clock)
   const ran = await $.command.run(named('name \u200b\u202e'))
   expect(ran.text).toContain('名称里没有能显示的字，已清除')
+})
+
+const task = (type: string, id = type) => ({ id, type, status: 'running', description: id })
+const notified = { text: '<task-notification>done</task-notification>', origin: { kind: 'task-notification' } }
+
+test('backgroundDetail names the count and the distinct types, in first-seen order', () => {
+  expect(backgroundDetail([task('shell')])).toBe('后台 1 个任务：shell')
+  expect(backgroundDetail([task('shell', 'a'), task('subagent'), task('shell', 'b')])).toBe('后台 3 个任务：shell · subagent')
+  expect(backgroundDetail([task('a'), task('b'), task('c'), task('d')])).toBe('后台 4 个任务：a · b · c 等')
+  expect(backgroundDetail([task('x'.repeat(300))]).length).toBe(200)
+})
+
+test('a turn that ends with a background task still running stays working until the task wakes the session', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+
+  await clock.advance(1000)
+  await $.prompt.submit({ text: 'start the server', origin: COMPOSER } as never)
+  await $.turn.start({ text: 'start the server', turnId: 't1' })
+  await clock.settle()
+  const sinceWorking = last(w).since
+  await clock.advance(2000)
+  await $.classic.Stop({ background_tasks: [task('shell')] } as never)
+  await $.turn.complete({ answer: 'Server is up.', durationMs: 3000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+
+  expect(last(w)).toMatchObject({ state: 'working', detail: '后台 1 个任务：shell', since: sinceWorking })
+  expect(last(w).lastAnswer.tail).toEqual(['Server is up.'])
+
+  await clock.advance(5000)
+  await $.prompt.submit(notified as never)
+  await $.turn.start({ text: notified.text, turnId: 't2' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: null })
+  expect(last(w).lastPrompt.text).toBe('start the server')
+
+  await $.classic.Stop({ background_tasks: [] } as never)
+  await $.turn.complete({ answer: 'The server exited.', durationMs: 100, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'your-turn', detail: null })
+  expect(last(w).lastAnswer.tail).toEqual(['The server exited.'])
+})
+
+test('Stop after turn.complete corrects your-turn back to working when tasks are running', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+  await $.classic.Stop({ background_tasks: [task('subagent')] } as never)
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: '后台 1 个任务：subagent' })
+})
+
+test('only the person\'s own prompts become the last prompt', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+
+  for (const kind of ['bridge', 'sdk']) {
+    await $.prompt.submit({ text: `from ${kind}`, origin: { kind } } as never)
+    await $.turn.start({ text: `from ${kind}`, turnId: kind })
+    await clock.settle()
+    expect(last(w).lastPrompt.text).toBe(`from ${kind}`)
+  }
+  for (const kind of ['task-notification', 'peer', 'scheduled-trigger']) {
+    await $.prompt.submit({ text: `from ${kind}`, origin: { kind } } as never)
+    await $.turn.start({ text: `from ${kind}`, turnId: kind })
+    await clock.settle()
+    expect(last(w)).toMatchObject({ state: 'working' })
+    expect(last(w).lastPrompt.text).toBe('from sdk')
+  }
+  // The remembered origin is spent: a turn.start with no prompt.submit counts as the person's.
+  await $.turn.start({ text: 'typed directly', turnId: 'z' })
+  await clock.settle()
+  expect(last(w).lastPrompt.text).toBe('typed directly')
+})
+
+/** A main-loop turn that ends at the current time with tasks running behind it. */
+async function endTurnWithTask($: any, clock: { settle: () => Promise<void> }, tasks = [task('shell')]) {
+  await $.turn.start({ text: 'start the server', turnId: 't1' })
+  await $.classic.Stop({ background_tasks: tasks } as never)
+  await $.turn.complete({ answer: 'Server is up.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+}
+
+test('tasks still running after 3 minutes hand the session back to the person, keeping the detail', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock)
+
+  await clock.advance(175_000)
+  expect(last(w)).toMatchObject({ state: 'working', detail: '后台 1 个任务：shell' })
+  await clock.advance(5_000)
+  await clock.settle()
+  expect(last(w)).toMatchObject({
+    state: 'your-turn',
+    detail: '后台 1 个任务：shell',
+    since: new Date(T0 + 180_000).toISOString(),
+  })
+  expect(last(w).lastAnswer.tail).toEqual(['Server is up.'])
+
+  // The wake still clears the remembered tasks as usual.
+  await $.prompt.submit(notified as never)
+  await $.turn.start({ text: notified.text, turnId: 't2' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: null })
+})
+
+test('a wake before 3 minutes cancels the switch to your-turn', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock)
+  await clock.advance(60_000)
+  await $.prompt.submit(notified as never)
+  await $.turn.start({ text: notified.text, turnId: 't2' })
+  await $.classic.Stop({ background_tasks: [] } as never)
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.settle()
+  const posts = w.posts.length
+  await clock.advance(300_000)
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'your-turn', detail: null, since: new Date(T0 + 60_000).toISOString() })
+  expect(new Set(w.posts.slice(posts).map(p => p.body.since)).size).toBe(1)
+})
+
+test("a subagent's Stop leaves a session with tasks running alone", BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock)
+  await $.classic.Stop({ agent_id: 'a1', background_tasks: [] } as never)
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: '后台 1 个任务：shell' })
+})
+
+test('an approval answered while tasks run goes back to working with the tasks shown', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock)
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'pnpm test' } })
+  await clock.settle()
+  expect(last(w).state).toBe('needs-approval')
+  await $.tool.call({ tool: 'Bash', command: 'pnpm test' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: '后台 1 个任务：shell' })
+})
+
+test('turn.complete with tasks running replaces a stuck approval with working', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.classic.Stop({ background_tasks: [task('shell')] } as never)
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await clock.settle()
+  expect(last(w).state).toBe('needs-approval')
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: '后台 1 个任务：shell' })
+})
+
+test('/clear forgets the tasks and the remembered prompt origin', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock)
+  await $.prompt.submit({ text: 'same', origin: { kind: 'peer' } } as never)
+  w.sessionId = 'session-two'
+  await $.session.end({ reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: null })
+  await $.turn.start({ text: 'same', turnId: 't3' })
+  await clock.settle()
+  expect(last(w).lastPrompt.text).toBe('same')
+})
+
+test('a prompt.submit that no turn.start followed does not hide the next typed prompt', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.prompt.submit(notified as never)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await clock.settle()
+  expect(last(w).lastPrompt.text).toBe('hi')
+})
+
+test("the person's prompt while tasks run clears them and becomes the last prompt", BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock)
+  await $.prompt.submit({ text: 'stop it', origin: COMPOSER } as never)
+  await $.turn.start({ text: 'stop it', turnId: 't2' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: null })
+  expect(last(w).lastPrompt.text).toBe('stop it')
+})
+
+test('a second Stop with fewer tasks updates the count and stays working', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock, [task('shell', 'a'), task('subagent')])
+  expect(last(w).detail).toBe('后台 2 个任务：shell · subagent')
+  await $.prompt.submit(notified as never)
+  await $.turn.start({ text: notified.text, turnId: 't2' })
+  await $.classic.Stop({ background_tasks: [task('subagent')] } as never)
+  await $.turn.complete({ answer: 'one left', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'working', detail: '后台 1 个任务：subagent' })
+})
+
+test('an approval resolved after the 3 minutes returns to your-turn, not working', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endTurnWithTask($, clock)
+  await clock.advance(180_000)
+  await clock.settle()
+  expect(last(w).state).toBe('your-turn')
+
+  await $.classic.PermissionRequest({ agent_id: 'a1', tool_name: 'Bash', tool_input: { command: 'ls' } } as never)
+  await clock.settle()
+  expect(last(w).state).toBe('needs-approval')
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'a1' })
+  await clock.settle()
+  expect(last(w)).toMatchObject({ state: 'your-turn', detail: '后台 1 个任务：shell' })
+})
+
+test('a task notification that arrives between Stop and turn.complete still keeps the last prompt', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.prompt.submit({ text: 'start the server', origin: COMPOSER } as never)
+  await $.turn.start({ text: 'start the server', turnId: 't1' })
+  await $.classic.Stop({ background_tasks: [task('shell')] } as never)
+  await $.prompt.submit(notified as never)
+  await $.turn.complete({ answer: 'Server is up.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await $.turn.start({ text: notified.text, turnId: 't2' })
+  await clock.settle()
+  expect(last(w).lastPrompt.text).toBe('start the server')
 })

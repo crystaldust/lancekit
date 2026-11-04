@@ -48,8 +48,8 @@ session-board 的上报端（每个会话里的 mod，Phase 2）和看板服务 
 | `state` | `working` \| `needs-approval` \| `your-turn` \| `ended` | 是 | 失联不由上报端发，由服务判定 |
 | `since` | 时间 | 是 | 进入当前状态的时间（上报端时钟） |
 | `sentAt` | 时间 | 是 | 这次上报发出的时间（上报端时钟） |
-| `detail` | string，≤ 200 \| null | 否 | 例如等批准时的 `Bash: pnpm test` |
-| `lastPrompt` | `{text, at}` \| null | 否 | 最后一次交代；`text` ≤ 2000 |
+| `detail` | string，≤ 200 \| null | 否 | 例如等批准时的 `Bash: pnpm test`；有后台任务在跑时的 `后台 2 个任务：shell · subagent` |
+| `lastPrompt` | `{text, at}` \| null | 否 | 最后一次交代，只记录人自己的提示词（终端输入、Remote Control、`claude -p`），不记任务通知或其他会话发来的消息；`text` ≤ 2000 |
 | `lastAnswer` | `{tail, at}` \| null | 否 | 最后一次回答的结尾；`tail` 是字符串数组，≤ 10 行、每行 ≤ 500 |
 | `ecc` | object \| null | 否 | ECC 进度，见下 |
 

@@ -85,3 +85,13 @@ export function sessionName(text: string): string | null {
   const tidy = text.replace(HIDDEN_CHARS, ' ').replace(/\s+/g, ' ').trim()
   return tidy === '' ? null : clip(tidy, NAME_CHARS).trim()
 }
+
+const BACKGROUND_TYPES_SHOWN = 3
+
+/** `后台 2 个任务：shell · subagent`: how many tasks run behind the turn, and of which kinds. */
+export function backgroundDetail(tasks: readonly { type: string }[]): string {
+  const types = [...new Set(tasks.map(task => task.type))]
+  const shown = types.slice(0, BACKGROUND_TYPES_SHOWN).join(' · ')
+  const more = types.length > BACKGROUND_TYPES_SHOWN ? ' 等' : ''
+  return clip(`后台 ${tasks.length} 个任务：${shown}${more}`, DETAIL_CHARS)
+}

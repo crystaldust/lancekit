@@ -177,3 +177,20 @@ test("a named session shows its name as the title and its project in the line be
     assert.equal(L.whereText(plain, false), "mac-mini");
   }
 });
+
+test("compactLines shows a working session's detail in place of the last prompt, and leaves other kinds alone", () => {
+  const prompt = { text: "fix it", at: ago(0) };
+  assert.deepEqual(
+    { ...L.compactLines(session({ detail: "后台 2 个任务：shell · subagent", lastPrompt: prompt })) },
+    { prompt: null, detail: "后台 2 个任务：shell · subagent" },
+  );
+  assert.deepEqual({ ...L.compactLines(session({ lastPrompt: prompt })) }, { prompt: "fix it", detail: null });
+  assert.deepEqual({ ...L.compactLines(session({ detail: "  ", lastPrompt: prompt })) }, { prompt: "fix it", detail: null });
+  for (const overrides of [{ state: "needs-approval" }, { state: "your-turn" }, { state: "ended" }, { isLost: true }]) {
+    assert.deepEqual(
+      { ...L.compactLines(session({ ...overrides, detail: "Bash: ls", lastPrompt: prompt })) },
+      { prompt: "fix it", detail: null },
+    );
+  }
+  assert.deepEqual({ ...L.compactLines(session()) }, { prompt: null, detail: null });
+});
