@@ -32,7 +32,7 @@ session-board 的上报端（每个会话里的 mod，Phase 2）和看板服务 
 
 ## Session ID
 
-只接受 `[A-Za-z0-9._-]{1,128}`，其他情况返回 `404`。服务只按会话 ID 区分卡片；`/clear` 或 resume 之后会话 ID 是否变化，由 Phase 2 确认。
+只接受 `[A-Za-z0-9._-]{1,128}`，其他情况返回 `404`。服务只按会话 ID 区分卡片。`/clear` 和 resume 之后会话 ID 会变：上报端先把旧 ID 报为 `ended`，再用新 ID 上报，所以大屏上旧卡片变成已退出，另出一张新卡片。
 
 ## Report body
 
@@ -132,6 +132,8 @@ session-board 的上报端（每个会话里的 mod，Phase 2）和看板服务 
 | `waitS` | 仅当 `from` 是 `needs-approval` 时有：新的 `since` 减旧的 `since`，即等批准用了多久 |
 
 `reportDelayS` 和 `waitS` 都只用同一台上报端的时钟做差，不受机器之间时钟偏差影响。秒数保留一位小数。
+
+会话第一次出现的那一行（`from` 为 `null`）的 `since` 可能早于看板启动，例如看板重启后各会话重新上报，所以它的 `reportDelayS` 不代表上报延迟。`scripts/metrics.py` 只用 `from` 不为 `null` 的行统计延迟。
 
 ## Compatibility
 
