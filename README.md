@@ -6,10 +6,11 @@ English | [简体中文](README.zh-CN.md)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.304-d97757)](https://code.claude.com)
 [![ECC](https://img.shields.io/badge/ECC-2.2.3-555)](https://github.com/affaan-m/ECC)
 
-A [Claude Code](https://code.claude.com) plugin marketplace with three plugins:
+A [Claude Code](https://code.claude.com) plugin marketplace with four plugins:
 
 - Two extensions for the [ECC](https://github.com/affaan-m/ECC) workflow, `/ecc:prp-prd` → `/ecc:prp-plan` → `/ecc:prp-implement`: a live progress pane, and a consistency audit of the planning documents.
 - A real-time chatlog of every session.
+- A wall board that shows, across machines, which sessions are waiting on you.
 
 ## Contents
 
@@ -20,6 +21,7 @@ A [Claude Code](https://code.claude.com) plugin marketplace with three plugins:
   - [ecc-progress](#ecc-progress)
   - [ecc-doc-check](#ecc-doc-check)
   - [chatlog](#chatlog)
+  - [session-board](#session-board)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -31,14 +33,15 @@ A [Claude Code](https://code.claude.com) plugin marketplace with three plugins:
 | [`ecc-progress`](plugins/ecc-progress) | mod | A side pane and status line showing PRD phases and live `/prp-implement` task and phase progress |
 | [`ecc-doc-check`](plugins/ecc-doc-check) | skill | A read-only audit of PRDs, PRP-PRDs and plans. It finds status drift, invalid statuses, broken or archived links, and orphan plans |
 | [`chatlog`](plugins/chatlog) | mod + skill + script | Writes every prompt, answer and tool call to `.claude/chatlog/` as it happens, and replays or exports the logs |
+| [`session-board`](plugins/session-board) | mod + script | Reports every session's state to a wall display that shows who is waiting on you, across machines on a LAN |
 
 A *mod* is a plugin built on Claude Code's function hooks (`hooks/register.tsx`). It can draw panes, set the status line and register commands and tools.
 
 ## Requirements
 
-- **Claude Code 2.1.304 or newer.** `ecc-progress` and `chatlog` are mods. Mods use function hooks, an early-access API that may change between Claude Code releases.
+- **Claude Code 2.1.304 or newer.** `ecc-progress`, `chatlog` and `session-board` are mods. Mods use function hooks, an early-access API that may change between Claude Code releases.
 - **ECC 2.2.3** for `ecc-progress` and `ecc-doc-check`. Both read the documents ECC writes; [docs/ecc-doc-formats.md](docs/ecc-doc-formats.md) lists the formats they depend on.
-- **Python 3.10+** for `ecc-doc-check` and the chatlog replay script.
+- **Python 3.10+** for `ecc-doc-check`, the chatlog replay script and the session-board server.
 
 ## Installation
 
@@ -49,6 +52,7 @@ claude plugin marketplace add crystaldust/lancekit   # or a local path to a clon
 claude plugin install ecc-progress@lancekit
 claude plugin install ecc-doc-check@lancekit
 claude plugin install chatlog@lancekit
+claude plugin install session-board@lancekit
 ```
 
 To update, refresh the marketplace and update the plugin, then start a new session:
@@ -151,6 +155,37 @@ The bundled `chatlog-replay` skill lets Claude find, read and summarize past ses
 | `gitignore` | `true` | Writes a `.gitignore` that keeps the chatlog folder out of git |
 | `redact` | `true` | Masks API keys, tokens, private keys and `password=` values before they reach disk |
 
+### session-board
+
+A wall display of every session on your LAN, ordered by who is waiting on you. Each session reports its state, its last prompt, the end of its last answer and its ECC progress to a small Python server; any browser on a big screen shows the board.
+
+- **等批准 (needs approval)** and **轮到你 (your turn)** sessions get large cards at the top with a timer, so you can tell from across the room which window to go to and how long it has waited. An approval card shows the tool call waiting, for example `Bash: pnpm test`.
+- Working, lost and ended sessions get small cards below.
+- A session that stops reporting for 30 seconds shows as lost. An ended session stays for 10 minutes.
+
+**1. Start the board** on the machine attached to the screen:
+
+```bash
+python3 plugins/session-board/scripts/board.py --host 0.0.0.0 --token <token> --record states.jsonl
+```
+
+It prints a link for every address it listens on, such as `http://192.168.0.226:7777/?token=…`. Open one on the big screen. Without `--host` it listens on `127.0.0.1` only. Without `--token` (or `SESSION_BOARD_TOKEN`) it makes up a token and prints it. The plugin's installed copy lives under `~/.claude/plugins/`; you can also run the script from a clone.
+
+**2. Point each machine at it.** In `/config`, under session-board, set **Board URL**. You can paste the whole printed link: the token in it is used. That link is then stored in plain settings. To keep the token in secure storage, put only the address in Board URL and give the token in **Token**, which Claude Code asks for when the plugin is installed and does not list in `/config`.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `boardUrl` | empty | The board's address. A `?token=` in it is used as the token |
+| `token` | empty | The board's token, kept in secure storage |
+
+Saving the option reloads the plugin, and the session starts reporting. `/session-board` shows the board address, this session's state and the result of its last report.
+
+**Try it without sessions:** `python3 plugins/session-board/scripts/demo.py --token <token>` pushes ten made-up sessions.
+
+**Check a day of use:** `python3 plugins/session-board/scripts/metrics.py states.jsonl` reads the record file and reports the approval wait (median, P90), the report delay and the peak number of sessions online.
+
+**Limits.** The token is a shared password and the board speaks plain HTTP, so run it on a network you trust. The board keeps state in memory only: after a restart, sessions reappear with their next heartbeat (every 5 seconds). The data contract is [docs/session-board-contract.md](docs/session-board-contract.md).
+
 ## Development
 
 ```
@@ -158,6 +193,8 @@ The bundled `chatlog-replay` skill lets Claude find, read and summarize past ses
 plugins/ecc-progress/             # mod: hooks/register.tsx, hooks/parse.ts, tests
 plugins/ecc-doc-check/            # skill: skills/prd-plan-audit (SKILL.md, scripts/, tests/)
 plugins/chatlog/                  # mod: hooks/, scripts/ (replay), skills/chatlog-replay
+plugins/session-board/            # mod: hooks/ (reporter); scripts/ (board server, demo, metrics); web/ (wall page)
+docs/session-board-contract.md    # the data contract between the session-board reporter and server
 docs/ecc-doc-formats.md           # the ECC formats the ECC plugins depend on
 ```
 
@@ -167,9 +204,12 @@ Validate, test, and try the plugins without installing them:
 claude plugin validate .                          # marketplace + plugins
 claude plugin test plugins/ecc-progress
 claude plugin test plugins/chatlog
+claude plugin test plugins/session-board
 (cd plugins/ecc-doc-check/skills/prd-plan-audit && python3 -m unittest discover -s tests)
 (cd plugins/chatlog/scripts && python3 -m unittest test_chatlog_replay)
-claude --plugin-dir plugins/ecc-progress --plugin-dir plugins/chatlog   # load from the working tree
+python3 -m unittest discover -s plugins/session-board/scripts
+node --test plugins/session-board/web/page.test.mjs
+claude --plugin-dir plugins/ecc-progress --plugin-dir plugins/chatlog --plugin-dir plugins/session-board   # load from the working tree
 ```
 
 Claude Code writes generated types to `plugins/*/.claude-plugin/types/` each time a mod loads. They are git-ignored.
@@ -181,7 +221,7 @@ Issues and pull requests are welcome.
 - Use [Conventional Commits](https://www.conventionalcommits.org): `feat:`, `fix:`, `docs:`, `chore:` and so on.
 - Bump a plugin's `version` in its `.claude-plugin/plugin.json` in a separate `chore: bump <plugin> to X` commit. Installed copies are cached by version, so without a bump users do not receive the change.
 - Run the validation and tests above before opening a pull request.
-- After an ECC upgrade, re-check [docs/ecc-doc-formats.md](docs/ecc-doc-formats.md). Update `plugins/ecc-progress/hooks/parse.ts` and `plugins/ecc-doc-check/skills/prd-plan-audit/scripts/audit.py` together.
+- After an ECC upgrade, re-check [docs/ecc-doc-formats.md](docs/ecc-doc-formats.md). Update `plugins/ecc-progress/hooks/parse.ts` and `plugins/ecc-doc-check/skills/prd-plan-audit/scripts/audit.py` together. `plugins/session-board/hooks/report.ts` reads ecc-progress's state, so check it too.
 
 ## License
 
