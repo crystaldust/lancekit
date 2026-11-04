@@ -1,5 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 
+import { needsRefresh, nameKey, NAME_KEY_PREFIX, parseEntry, staleNames } from './names'
 import { buildReport, boardSessionId, eccSummary, parseBoardUrl, projectName, sessionUrl } from './report'
 import type { Board, EccLive, EccPlan, EccPrd, EccSummary, Where } from './report'
 import { backgroundDetail, clip, enter, initialStatus, questionDetail, sessionName, toolDetail, withAnswer, withPrompt } from './status'
@@ -63,6 +64,17 @@ type Reporter = {
   backgroundSince: number | null
   /** True once the wait ran out and the session was handed back to the person with the tasks still running. */
   backgroundExpired: boolean
+  /** Set by /clear or /resume until the new session id is known and the name has been settled for it. */
+  switched: 'clear' | 'resume' | null
+  /** Counts session starts and /clear or /resume switches, so a slow lookup can tell it is out of date. */
+  generation: number
+  /** The id of the session that just ended in a /clear or /resume; the host may still answer with it for a moment. */
+  endedId: string | null
+  /** Bumped by every rename; compared with its value at the switch to tell whether the person named the session since. */
+  nameRevision: number
+  switchedRevision: number
+  /** The lookup of the new id (and its name) while one is under way; shared by whoever needs the id meanwhile. */
+  settling: Promise<string> | null
 }
 
 async function readEcc($: $): Promise<EccSummary | null> {
@@ -77,6 +89,64 @@ async function readEcc($: $): Promise<EccSummary | null> {
   }
 }
 
+/** Writes the name for `id` into the store (null removes it); throws when the store refuses. */
+async function writeName($: $, id: string, name: string | null, now: number) {
+  if (name === null) await $.store.delete(nameKey(id))
+  else await $.store.set(nameKey(id), { name, at: now })
+}
+
+/** The stored name for `id`, stamped anew when old enough that pruning could take it; null for none. */
+async function readName($: $, id: string): Promise<string | null> {
+  const found = parseEntry(await $.store.get(nameKey(id)))
+  if (found === null) return null
+  const now = await $.clock.now()
+  if (needsRefresh(found, now)) await writeName($, id, found.name, now).catch(() => {})
+  return found.name
+}
+
+/**
+ * After a /clear the name goes under the new id; after a /resume the resumed conversation's name replaces it,
+ * unless the person has named the session since the switch, which then counts like a /clear.
+ */
+async function settleName($: $, r: Reporter, id: string, switched: 'clear' | 'resume' | null, generation: number) {
+  if (switched === null) return
+  if (switched === 'resume' && r.nameRevision === r.switchedRevision) {
+    const name = await readName($, id).catch(() => null)
+    if (r.generation !== generation || r.nameRevision !== r.switchedRevision) return
+    r.where = { ...r.where, name }
+    await $.state.set(NAME, name).catch(() => {})
+    return
+  }
+  const { name } = r.where
+  if (name !== null) await writeName($, id, name, await $.clock.now()).catch(() => {})
+}
+
+/** The session's id; the first time after a /clear or /resume it also settles the name for the new id. */
+function currentId($: $, r: Reporter): Promise<string> {
+  if (r.settling !== null) return r.settling
+  if (r.sessionId !== null) return Promise.resolve(r.sessionId)
+  const generation = r.generation
+  const lookup = (async () => {
+    const id = await $.session.id()
+    // A session.end ran meanwhile: start over for the new generation.
+    if (r.generation !== generation) return currentId($, r)
+    // The host still answers with the ended session's id: leave it unset, a later call settles.
+    if (id === r.endedId) throw new Error('会话 id 还没有切换')
+    r.endedId = null
+    r.sessionId = id
+    const { switched } = r
+    r.switched = null
+    await settleName($, r, id, switched, generation)
+    return id
+  })()
+  r.settling = lookup
+  const release = () => {
+    if (r.settling === lookup) r.settling = null
+  }
+  lookup.then(release, release)
+  return lookup
+}
+
 async function postOnce($: $, r: Reporter) {
   const { board, status } = r
   if (board === null || status === null) return
@@ -84,8 +154,7 @@ async function postOnce($: $, r: Reporter) {
   try {
     now = await $.clock.now()
     // Read once: a /clear or /resume may replace r.sessionId while this request is out.
-    const sessionId = r.sessionId ?? (await $.session.id())
-    r.sessionId ??= sessionId
+    const sessionId = await currentId($, r)
     const body = JSON.stringify(buildReport(status, r.where, await readEcc($), now))
     const request = $.http.fetch(sessionUrl(board, boardSessionId(sessionId)), {
       method: 'POST',
@@ -147,12 +216,64 @@ async function expireBackground($: $, r: Reporter): Promise<boolean> {
   return true
 }
 
+/** True once the session id is known and its name settled; false when that failed or took too long. */
+async function isSettled($: $, r: Reporter): Promise<boolean> {
+  const settled = currentId($, r).then(() => true, () => false)
+  return Promise.race([settled, $.clock.sleep(REQUEST_TIMEOUT_MS).then(() => false)])
+}
+
+/** Writes the name (null removes it) for this session into the store; false when that failed. */
+async function saveName($: $, r: Reporter, name: string | null): Promise<boolean> {
+  try {
+    await writeName($, await currentId($, r), name, await $.clock.now())
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The name a fresh process starts with: the host's copy after a reload, else the one stored for this session id. */
+async function restoreName($: $): Promise<string | null> {
+  const held = await $.state.get(NAME).then(read => read.value as string | null | undefined, () => null)
+  if (held !== undefined) return held
+  try {
+    const found = await readName($, await $.session.id())
+    if (found !== null) await $.state.set(NAME, found).catch(() => {})
+    return found
+  } catch {
+    return null
+  }
+}
+
+/** Forgets stored names that are malformed, older than 90 days or beyond the newest 200. Best effort. */
+async function pruneNames($: $) {
+  try {
+    const keys = (await $.store.keys()).filter(key => key.startsWith(NAME_KEY_PREFIX))
+    const entries: [string, unknown][] = []
+    for (const key of keys) entries.push([key, await $.store.get(key)])
+    const now = await $.clock.now()
+    const scanned = new Map(entries)
+    for (const key of staleNames(entries, now)) {
+      // Re-read: the entry may have been renamed or reopened since the scan.
+      const fresh = await $.store.get(key)
+      const isUnchanged = JSON.stringify(fresh) === JSON.stringify(scanned.get(key))
+      if (isUnchanged || staleNames([[key, fresh]], now).length > 0) await $.store.delete(key)
+    }
+  } catch {
+    // Pruning is housekeeping; the next start tries again.
+  }
+}
+
 /** Sets (or, for blank text, clears) the session's name, keeps it in state and reports it at once. */
 async function rename($: $, r: Reporter, text: string): Promise<string> {
+  // A switch still settling should finish first; it is bounded so a hung host cannot stall the command.
+  const isSettledFirst = await isSettled($, r)
   const name = sessionName(text)
+  r.nameRevision += 1
   r.where = { ...r.where, name }
   $.clock.after(0, () => send($, r))
   const kept = await $.state.set(NAME, name).then(() => true, () => false)
+  const stored = isSettledFirst && (await saveName($, r, name))
   const project = projectName(r.where.cwd)
   const shown =
     name !== null ? `名称已设为「${name}」`
@@ -161,6 +282,7 @@ async function rename($: $, r: Reporter, text: string): Promise<string> {
   return [
     shown,
     kept ? null : '名称没能保存：这次会话里有效，插件重新加载（比如改了选项）后会丢，需要重设。',
+    stored ? null : '名称没能存到本机，下次打开不会恢复。',
     r.board === null ? '还没配置看板地址，配好后会一起上报。' : null,
   ].filter(line => line !== null).join('\n')
 }
@@ -179,14 +301,24 @@ export const register: Register = (on, options) => {
     promptOrigin: null,
     backgroundSince: null,
     backgroundExpired: false,
+    switched: null,
+    generation: 0,
+    endedId: null,
+    nameRevision: 0,
+    switchedRevision: 0,
+    settling: null,
   }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'session-board', description: 'Show whether this session reaches the session board; "name <名称>" names the session on the board' })
     const host = await $.process.run(['hostname', '-s']).then(r => r.stdout.trim(), () => '')
-    const kept = await $.state.get(NAME).then(read => read.value ?? null, () => null)
+    const kept = await restoreName($)
     r.where = { host: host || 'unknown', cwd: e.cwd, name: kept }
     r.sessionId = null
+    r.switched = null
+    r.settling = null
+    r.endedId = null
+    r.generation += 1
     r.status = r.status ?? initialStatus(await $.clock.now())
     $.clock.every(HEARTBEAT_MS, async () => {
       if (r.status?.state === 'ended') return
@@ -194,6 +326,7 @@ export const register: Register = (on, options) => {
       return send($, r)
     })
     $.clock.after(0, () => send($, r))
+    $.clock.after(0, () => pruneNames($))
     return next(e)
   })
 
@@ -292,11 +425,19 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       // The process goes on under another id, and no session.start follows.
       r.sessionId = null
+      r.switched = e.reason
+      r.settling = null
+      r.generation += 1
+      r.endedId = e.sessionId
+      r.switchedRevision = r.nameRevision
       r.background = null
       r.backgroundSince = null
       r.backgroundExpired = false
       r.promptOrigin = null
       r.status = initialStatus(await $.clock.now())
+      // The host answers with the ended id until this hook returns, so the new id is read on the next tick.
+      // That settles the name without a board or a heartbeat.
+      $.clock.after(0, () => currentId($, r).then(() => undefined, () => undefined))
       $.clock.after(0, () => send($, r))
     }
     return next(e)

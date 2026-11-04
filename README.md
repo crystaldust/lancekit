@@ -180,7 +180,7 @@ It prints a link for every address it listens on, such as `http://192.168.0.226:
 
 Saving the option reloads the plugin, and the session starts reporting. `/session-board` shows the board address, this session's state and the result of its last report.
 
-**Name a session:** `/session-board name <name>` puts that name on the card in place of the project name, so two sessions in one project are easy to tell apart. The project moves to the line below. `/session-board name` with no name clears it. The name lasts until Claude Code exits, through `/clear` and option changes.
+**Name a session:** `/session-board name <name>` puts that name on the card in place of the project name, so two sessions in one project are easy to tell apart. The project moves to the line below. `/session-board name` with no name clears it. The name is saved with the conversation and restored when it is reopened with `--resume`, `--continue` or `/resume`. `/clear` and option changes keep it. It is stored on this machine only, and a name not renamed or reopened for 90 days is forgotten (at most 200 are kept).
 
 **Background tasks:** a session whose turn ended with background tasks still running shows as working, with the tasks in its detail line (for example `后台 2 个任务：shell · subagent`), not under "waiting on you". If the tasks have not finished after 3 minutes, it moves to "your turn" anyway (the tasks stay in the detail line), so a dev server still gets your attention.
 

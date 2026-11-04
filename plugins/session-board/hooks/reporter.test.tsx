@@ -4,6 +4,7 @@ import type { HttpResponse, On } from 'claude-code'
 
 import { answerTail, backgroundDetail, clip, sessionName, toolDetail } from './status'
 import { boardSessionId, eccSummary, parseBoardUrl } from './report'
+import { NAME_MAX_AGE_MS, NAME_MAX_ENTRIES, needsRefresh, nameKey, parseEntry, staleNames } from './names'
 
 const BOARD = { options: { boardUrl: 'http://board.lan:7777/?token=secret', token: '' } }
 const T0 = Date.UTC(2026, 10, 3, 8, 0, 0)
@@ -26,11 +27,27 @@ type World = {
   mine: Record<string, unknown>
   /** When set, writes to $.state are refused with this reason. */
   stateDeny: string | null
+  /** The plugin's own $.store, as the host keeps it across sessions. */
+  store: Record<string, unknown>
+  /** When set, writes to $.store are refused with this reason. */
+  storeDeny: string | null
+  /** When set, reads from $.store are refused with this reason. */
+  storeGetDeny: string | null
+  /** The key of every $.store.set that went through, in order. */
+  storeWrites: string[]
+  /** While a clear/resume session.end is dispatched the host still answers with the ending session's id. */
+  endingFrom: string | null
+  /** When set, $.session.id() is refused with this reason. */
+  idDeny: string | null
+  /** When true, $.session.id() never answers. */
+  idHangs: boolean
+  /** Runs after each $.store.get, with the key just read. */
+  afterGet: ((key: string) => void) | null
 }
 
 /** The engine beneath the plugin: a board that records each POST, a host, a session. */
 function world(on: On): World {
-  const w: World = { posts: [], respond: () => OK, sessionId: 'session-one', ecc: {}, mine: {}, stateDeny: null }
+  const w: World = { posts: [], respond: () => OK, sessionId: 'session-one', ecc: {}, mine: {}, stateDeny: null, store: {}, storeDeny: null, storeGetDeny: null, storeWrites: [], endingFrom: null, idDeny: null, idHangs: false, afterGet: null }
   on('http.fetch', async (_, e) => {
     const post = { url: e.url, headers: e.init?.headers ?? {}, body: JSON.parse(e.init?.body ?? '{}') }
     w.posts.push(post)
@@ -40,7 +57,11 @@ function world(on: On): World {
   on('process.run', () => ({
     value: { exitCode: 0, stdout: 'mac-mini\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('session.id', () => ({ value: w.sessionId }))
+  on('session.id', () => {
+    if (w.idDeny !== null) return { deny: w.idDeny }
+    if (w.idHangs) return new Promise<never>(() => {})
+    return { value: w.endingFrom ?? w.sessionId }
+  })
   on('state.get', (_, e) => {
     const { plugin, key } = e as { plugin: string; key: string }
     const value = (plugin === 'session-board' ? w.mine : w.ecc)[key]
@@ -52,6 +73,25 @@ function world(on: On): World {
     if (plugin === 'session-board') w.mine[key] = value
     return { value: { isSet: true, version: 2 } }
   })
+  on('store.get', (_, e) => {
+    if (w.storeGetDeny !== null) return { deny: w.storeGetDeny }
+    const key = (e as { key: string }).key
+    const value = w.store[key]
+    w.afterGet?.(key)
+    return { value }
+  })
+  on('store.set', (_, e) => {
+    if (w.storeDeny !== null) return { deny: w.storeDeny }
+    const { key, value } = e as { key: string; value: unknown }
+    w.store[key] = value
+    w.storeWrites.push(key)
+    return { value: undefined }
+  })
+  on('store.delete', (_, e) => {
+    delete w.store[(e as { key: string }).key]
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: Object.keys(w.store) }))
   on('command.register', () => ({ value: { command: 'session-board' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => e)
@@ -63,6 +103,18 @@ function world(on: On): World {
   on('classic.Notification', () => ({}))
   on('classic.Stop', () => ({}))
   return w
+}
+
+type EndEvent = { reason: string; sessionId: string; resume: { id: string } }
+
+/** session.end as the host runs it: for /clear and /resume the old id is still current until the dispatch returns. */
+async function endSession($: any, w: World, e: EndEvent) {
+  w.endingFrom = e.reason === 'clear' || e.reason === 'resume' ? e.sessionId : null
+  try {
+    return await $.session.end(e)
+  } finally {
+    w.endingFrom = null
+  }
 }
 
 const states = (w: World) => w.posts.map(p => p.body.state)
@@ -246,7 +298,7 @@ test('after /clear the old session is ended and a new one starts under the new i
   await $.turn.start({ text: 'first', turnId: 't1' })
   await clock.settle()
   w.sessionId = 'session-two'
-  await $.session.end({ reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
   await clock.settle()
 
   expect(w.posts.map(p => [p.url.split('/').pop(), p.body.state])).toEqual([
@@ -285,7 +337,7 @@ test('after /resume the old card is ended and the resumed conversation reports u
   const w = world(on)
   await start($, clock)
   w.sessionId = 'session-two'
-  await $.session.end({ reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
   await clock.settle()
   await clock.advance(5000)
 
@@ -380,7 +432,7 @@ test('a name kept in state outlives a reload and carries over to the session aft
   expect(last(w).name).toBe('接口联调')
 
   w.sessionId = 'session-two'
-  await $.session.end({ reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
   await clock.settle()
   expect(w.posts.map(p => [p.url.split('/').pop(), p.body.name]).slice(-2)).toEqual([
     ['session-one', '接口联调'],
@@ -448,6 +500,420 @@ test('a name of only hidden characters is cleared, and the reply says why', BOAR
   await start($, clock)
   const ran = await $.command.run(named('name \u200b\u202e'))
   expect(ran.text).toContain('名称里没有能显示的字，已清除')
+})
+
+const DAY = 24 * 60 * 60 * 1000
+const entry = (w: World, id: string) => w.store[nameKey(id)] as { name: string; at: number } | undefined
+const seed = (w: World, id: string, name: string, at: number) => {
+  w.store[nameKey(id)] = { name, at }
+}
+
+test('a fresh start restores the name stored for this session id', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '前端重构', T0 - 1000)
+  await start($, clock)
+  expect(last(w).name).toBe('前端重构')
+  expect(w.mine.name).toBe('前端重构')
+})
+
+test('a fresh start under another session id has no name', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-other', '别人的', T0)
+  await start($, clock)
+  expect(last(w).name).toBe(null)
+  expect(w.mine.name).toBe(undefined)
+})
+
+test('a reload uses the name in state, not the store', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.mine.name = '状态里的'
+  seed(w, 'session-one', '存储里的', T0)
+  await start($, clock)
+  expect(last(w).name).toBe('状态里的')
+})
+
+test('a name cleared in this process stays cleared although the store has one', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.mine.name = null
+  seed(w, 'session-one', '旧名', T0)
+  await start($, clock)
+  expect(last(w).name).toBe(null)
+})
+
+test('a malformed stored entry gives no name and does not break start', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.store[nameKey('session-one')] = 'garbage'
+  await start($, clock)
+  expect(last(w).name).toBe(null)
+})
+
+test('a store that cannot be read at start gives no name and does not break start', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '有名', T0)
+  w.storeGetDeny = 'store unavailable'
+  await start($, clock)
+  expect(last(w).name).toBe(null)
+  expect(last(w).state).toBe('your-turn')
+})
+
+test('naming writes this session id its own key, and clearing deletes only that key', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-other', '别人的', T0 - DAY)
+  await start($, clock)
+  await $.command.run(named('name 联调'))
+  expect(entry(w, 'session-one')).toEqual({ name: '联调', at: T0 })
+  expect(entry(w, 'session-other')).toEqual({ name: '别人的', at: T0 - DAY })
+
+  await $.command.run(named('name'))
+  expect(entry(w, 'session-one')).toBe(undefined)
+  expect(entry(w, 'session-other')).toEqual({ name: '别人的', at: T0 - DAY })
+})
+
+test('a name the store cannot keep still applies, and the reply says it will not be restored', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.storeDeny = 'store is read-only here'
+  await start($, clock)
+  const ran = await $.command.run(named('name 临时'))
+  await clock.settle()
+  expect(ran.text).toContain('名称已设为「临时」')
+  expect(ran.text).toContain('名称没能存到本机，下次打开不会恢复。')
+  expect(ran.text).not.toContain('名称没能保存')
+  expect(last(w).name).toBe('临时')
+  expect(w.mine.name).toBe('临时')
+})
+
+test('/clear keeps the name and saves it under the new id with a single store write', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.command.run(named('name 联调'))
+  w.sessionId = 'session-two'
+  await clock.advance(1000)
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(last(w).name).toBe('联调')
+  expect(entry(w, 'session-one')).toEqual({ name: '联调', at: T0 })
+  expect(entry(w, 'session-two')).toEqual({ name: '联调', at: T0 + 1000 })
+  expect(w.storeWrites).toEqual([nameKey('session-one'), nameKey('session-two')])
+  const after = w.posts.slice(w.posts.findIndex(p => p.body.state === 'ended') + 1)
+  expect(after.length).toBeGreaterThan(0)
+  expect(after.map(p => p.url.split('/').pop())).toEqual(after.map(() => 'session-two'))
+  expect(after.map(p => p.body.name)).toEqual(after.map(() => '联调'))
+})
+
+test('/clear saves the name under the new id without a board URL', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.command.run(named('name 联调'))
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(entry(w, 'session-two')?.name).toBe('联调')
+})
+
+test('/clear with no name writes nothing', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(w.storeWrites).toEqual([])
+  expect(last(w).name).toBe(null)
+})
+
+test('/clear keeps the name when the store cannot be written or read', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.command.run(named('name 联调'))
+  w.storeDeny = 'read-only'
+  w.storeGetDeny = 'unavailable'
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(last(w).name).toBe('联调')
+  expect(last(w).state).toBe('your-turn')
+  expect(entry(w, 'session-two')).toBe(undefined)
+})
+
+test('in-session /resume switches to the name stored for the resumed conversation', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '现在的', T0)
+  seed(w, 'session-two', '之前的', T0 - 1000)
+  await start($, clock)
+  expect(last(w).name).toBe('现在的')
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(last(w).name).toBe('之前的')
+  expect(w.mine.name).toBe('之前的')
+})
+
+test('in-session /resume switches the name without a board URL, with no heartbeat needed', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-two', '之前的', T0 - 1000)
+  await start($, clock)
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(w.mine.name).toBe('之前的')
+})
+
+test('in-session /resume to a conversation without a name clears the name', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '现在的', T0)
+  await start($, clock)
+  w.sessionId = 'session-three'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(last(w).name).toBe(null)
+  expect(w.mine.name).toBe(null)
+  expect(entry(w, 'session-one')).toEqual({ name: '现在的', at: T0 })
+})
+
+test('in-session /resume with an unreadable store leaves no name', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '现在的', T0)
+  seed(w, 'session-two', '之前的', T0)
+  await start($, clock)
+  w.storeGetDeny = 'unavailable'
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(last(w).name).toBe(null)
+  expect(last(w).state).toBe('your-turn')
+})
+
+test('a rename right after /resume sticks in memory, state and store', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '现在的', T0)
+  seed(w, 'session-two', '之前的', T0)
+  await start($, clock)
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  const ran = await $.command.run(named('name 新名'))
+  await clock.settle()
+  expect(ran.text).toContain('名称已设为「新名」')
+  expect(w.mine.name).toBe('新名')
+  expect(entry(w, 'session-two')?.name).toBe('新名')
+  expect(entry(w, 'session-one')?.name).toBe('现在的')
+})
+
+test('a rename right after /resume is what the board shows', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-two', '之前的', T0)
+  await start($, clock)
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await $.command.run(named('name 新名'))
+  await clock.settle()
+  expect(last(w).name).toBe('新名')
+})
+
+test('/clear followed by /resume ends on the resumed conversation name', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-three', '第三个', T0)
+  await start($, clock)
+  await $.command.run(named('name 联调'))
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  w.sessionId = 'session-three'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-two', resume: { id: 'session-two' } })
+  await clock.settle()
+  expect(last(w).name).toBe('第三个')
+  expect(w.mine.name).toBe('第三个')
+  expect(entry(w, 'session-two')?.name).toBe('联调')
+})
+
+test('a restored name older than a day is stamped with the current time', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '老名', T0 - 2 * DAY)
+  await start($, clock)
+  expect(last(w).name).toBe('老名')
+  expect(entry(w, 'session-one')).toEqual({ name: '老名', at: T0 })
+})
+
+test('a name restored within a day is not rewritten', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-one', '新名', T0 - DAY / 2)
+  await start($, clock)
+  expect(entry(w, 'session-one')).toEqual({ name: '新名', at: T0 - DAY / 2 })
+  expect(w.storeWrites).toEqual([])
+})
+
+test('a name adopted on /resume that is older than a day is stamped with the current time', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-two', '老名', T0 - 3 * DAY)
+  await start($, clock)
+  w.sessionId = 'session-two'
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(entry(w, 'session-two')).toEqual({ name: '老名', at: T0 })
+})
+
+test('start prunes expired and malformed names and leaves other keys alone', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'old', '过期', T0 - 100 * DAY)
+  seed(w, 'fine', '还在', T0 - 10 * DAY)
+  w.store[nameKey('bad')] = { name: 3 }
+  w.store.unrelated = 'keep'
+  await start($, clock)
+  expect(Object.keys(w.store).sort()).toEqual([nameKey('fine'), 'unrelated'])
+})
+
+test('start keeps at most 200 names, the oldest dropped first', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  for (let i = 0; i < NAME_MAX_ENTRIES + 5; i++) seed(w, `s${i}`, `n${i}`, T0 - 50 * DAY + i)
+  await start($, clock)
+  const keys = Object.keys(w.store)
+  expect(keys.length).toBe(NAME_MAX_ENTRIES)
+  expect(keys).not.toContain(nameKey('s0'))
+  expect(keys).not.toContain(nameKey('s4'))
+  expect(keys).toContain(nameKey('s5'))
+})
+
+test('a store that fails while pruning does not break start', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'old', '过期', T0 - 100 * DAY)
+  w.storeGetDeny = 'unavailable'
+  await start($, clock)
+  expect(last(w).state).toBe('your-turn')
+})
+
+test('name entries: parseEntry accepts only a string name with a finite numeric at', () => {
+  expect(parseEntry({ name: 'A', at: 5 })).toEqual({ name: 'A', at: 5 })
+  for (const bad of [undefined, null, 'x', 7, [], { name: 3, at: 1 }, { name: 'x' }, { at: 1 }, { name: 'x', at: '1' }, { name: 'x', at: Number.NaN }]) {
+    expect(parseEntry(bad)).toBe(null)
+  }
+})
+
+test('name entries: needsRefresh is true only past a day', () => {
+  expect(needsRefresh({ name: 'a', at: T0 - DAY }, T0)).toBe(false)
+  expect(needsRefresh({ name: 'a', at: T0 - DAY - 1 }, T0)).toBe(true)
+  expect(needsRefresh({ name: 'a', at: T0 }, T0)).toBe(false)
+})
+
+test('name entries: staleNames picks expired and malformed keys', () => {
+  const now = 1_000 * DAY
+  const out = staleNames(
+    [
+      ['old', { name: 'o', at: now - NAME_MAX_AGE_MS - 1 }],
+      ['edge', { name: 'e', at: now - NAME_MAX_AGE_MS }],
+      ['bad', 'text'],
+      ['nul', null],
+      ['ok', { name: 'k', at: now }],
+    ],
+    now,
+  )
+  expect(out.sort()).toEqual(['bad', 'nul', 'old'])
+  expect(staleNames([], now)).toEqual([])
+})
+
+test('name entries: staleNames drops the oldest beyond 200', () => {
+  const now = 1_000 * DAY
+  const entries = Array.from({ length: NAME_MAX_ENTRIES + 3 }, (_, i) => [`s${i}`, { name: 'n', at: now - 50 * DAY + i }] as const)
+  expect(staleNames(entries, now).sort()).toEqual(['s0', 's1', 's2'])
+})
+
+test('a rename before the new id shows up is applied, not stored under the ended id, and saved once the id settles', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  const ran = await $.command.run(named('name 抢先'))
+  expect(ran.text).toContain('名称已设为「抢先」')
+  expect(ran.text).toContain('名称没能存到本机，下次打开不会恢复。')
+  expect(w.mine.name).toBe('抢先')
+  expect(w.storeWrites).toEqual([])
+
+  w.sessionId = 'session-two'
+  await clock.settle()
+  expect(entry(w, 'session-two')?.name).toBe('抢先')
+  expect(entry(w, 'session-one')).toBe(undefined)
+})
+
+test('a rename before /resume settles wins over the resumed conversation name', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'session-two', '之前的', T0)
+  await start($, clock)
+  await endSession($, w, { reason: 'resume', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await $.command.run(named('name 抢先'))
+  w.sessionId = 'session-two'
+  await clock.settle()
+  expect(w.mine.name).toBe('抢先')
+})
+
+test('a session id that cannot be read while settling does not hang, and a later call settles', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  await $.command.run(named('name 联调'))
+  w.idDeny = 'id unavailable'
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  w.sessionId = 'session-two'
+  await clock.settle()
+  expect(entry(w, 'session-two')).toBe(undefined)
+
+  w.idDeny = null
+  const ran = await $.command.run(named('name 再起'))
+  expect(ran.text).not.toContain('名称没能存到本机')
+  expect(entry(w, 'session-two')?.name).toBe('再起')
+})
+
+test('a rename does not wait on a session id that never answers', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  w.idHangs = true
+  const running = $.command.run(named('name 临时'))
+  await clock.advance(4000)
+  const ran = await running
+  expect(ran.text).toContain('名称已设为「临时」')
+  expect(ran.text).toContain('名称没能存到本机，下次打开不会恢复。')
+  expect(w.mine.name).toBe('临时')
+})
+
+test('prune leaves an entry that was re-stamped between the scan and the delete', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  seed(w, 'old', '续命', T0 - 100 * DAY)
+  seed(w, 'gone', '过期', T0 - 100 * DAY)
+  w.afterGet = key => {
+    if (key === nameKey('old')) {
+      w.afterGet = null
+      seed(w, 'old', '续命', T0)
+    }
+  }
+  await start($, clock)
+  expect(entry(w, 'old')).toEqual({ name: '续命', at: T0 })
+  expect(entry(w, 'gone')).toBe(undefined)
 })
 
 const task = (type: string, id = type) => ({ id, type, status: 'running', description: id })
@@ -622,7 +1088,7 @@ test('/clear forgets the tasks and the remembered prompt origin', BOARD, async (
   await endTurnWithTask($, clock)
   await $.prompt.submit({ text: 'same', origin: { kind: 'peer' } } as never)
   w.sessionId = 'session-two'
-  await $.session.end({ reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await endSession($, w, { reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
   await clock.settle()
   await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } })
   await $.tool.call({ tool: 'Bash', command: 'ls' })
