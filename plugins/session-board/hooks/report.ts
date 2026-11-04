@@ -90,7 +90,8 @@ export function projectName(cwd: string): string {
   return clip(parts[parts.length - 1] || cwd || 'unknown', PROJECT_CHARS)
 }
 
-export type Where = { host: string; cwd: string }
+/** Where the session runs, and the name it was given with /session-board name. */
+export type Where = { host: string; cwd: string; name: string | null }
 
 export function buildReport(status: Status, where: Where, ecc: EccSummary | null, now: number) {
   return {
@@ -98,6 +99,7 @@ export function buildReport(status: Status, where: Where, ecc: EccSummary | null
     host: clip(where.host || 'unknown', HOST_CHARS),
     cwd: clip(where.cwd, CWD_CHARS),
     project: projectName(where.cwd),
+    name: where.name,
     state: status.state,
     since: iso(Math.min(status.since, now)),
     sentAt: iso(now),

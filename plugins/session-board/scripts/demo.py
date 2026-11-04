@@ -66,6 +66,9 @@ SESSIONS = [
      None, "总结本周的会话记录", None, None, False),
 ]
 
+# Names given with /session-board name: two sessions in the same project, told apart.
+NAMES = {"demo-ai-video": "分镜导出", "demo-ai-video-mb": "角色参考图"}
+
 
 def iso(seconds: float) -> str:
     stamp = datetime.fromtimestamp(seconds, tz=timezone.utc)
@@ -79,6 +82,7 @@ def build_reports(now: float) -> list[tuple[str, dict, bool]]:
         since = now - age
         body = {
             "v": 1, "host": host, "cwd": cwd, "project": cwd.rstrip("/").rsplit("/", 1)[-1],
+            "name": NAMES.get(sid),
             "state": state, "since": iso(since), "sentAt": iso(now), "detail": detail,
             "lastPrompt": {"text": prompt, "at": iso(since - 30)} if prompt else None,
             "lastAnswer": {"tail": tail, "at": iso(since)} if tail else None,

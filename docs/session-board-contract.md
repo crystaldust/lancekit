@@ -44,6 +44,7 @@ session-board 的上报端（每个会话里的 mod，Phase 2）和看板服务 
 | `host` | string，≤ 64 | 是 | 机器名 |
 | `cwd` | string，≤ 512 | 是 | 会话工作目录 |
 | `project` | string，≤ 128 | 是 | 显示用的项目名，上报端取 `cwd` 的最后一段 |
+| `name` | string，≤ 64 \| null | 否 | 用户用 `/session-board name` 起的名称，大屏用它代替项目名做卡片标题；上报端最长发 40 字。服务把控制字符和不可见的格式字符（双向覆盖、零宽空格等）换成空格、合并空白，结果为空时按 `null` 处理 |
 | `state` | `working` \| `needs-approval` \| `your-turn` \| `ended` | 是 | 失联不由上报端发，由服务判定 |
 | `since` | 时间 | 是 | 进入当前状态的时间（上报端时钟） |
 | `sentAt` | 时间 | 是 | 这次上报发出的时间（上报端时钟） |
@@ -54,7 +55,7 @@ session-board 的上报端（每个会话里的 mod，Phase 2）和看板服务 
 
 - **时间**：UTC 的 ISO 8601，精确到毫秒，以 `Z` 结尾，例如 `2026-11-03T08:00:00.000Z`。格式必须完全一致（两位补零、三位毫秒），年份在 2000–2099 之间，否则返回 `400`。
 - **字符串**：必须是合法的 Unicode。JSON 允许的孤立代理字符（如 `\ud800`）返回 `400`。
-- **长度**：`host`、`cwd`、`project`、`detail` 超长时返回 `400`。`lastPrompt.text` 和 `lastAnswer.tail` 超长时服务截断，不报错：`text` 保留前 2000 字，`tail` 保留最后 10 行，每行截到 500 字。
+- **长度**：`host`、`cwd`、`project`、`name`、`detail` 超长时返回 `400`。`lastPrompt.text` 和 `lastAnswer.tail` 超长时服务截断，不报错：`text` 保留前 2000 字，`tail` 保留最后 10 行，每行截到 500 字。
 - **未知字段**：顶层的未知字段被丢掉，不报错。
 
 ### `ecc`

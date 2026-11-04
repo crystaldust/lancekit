@@ -164,3 +164,16 @@ test("syncText, clockText and timeText format for the header and banner", () => 
   assert.equal(L.clockText(date), "09:05");
   assert.equal(L.timeText(date), "09:05:07");
 });
+
+test("a named session shows its name as the title and its project in the line below", () => {
+  const named = session({ name: "前端重构" });
+  assert.equal(L.titleOf(named), "前端重构");
+  assert.equal(L.whereText(named, true), "app · mac-mini · ~/app");
+  assert.equal(L.whereText(named, false), "app · mac-mini");
+  for (const name of [null, undefined, ""]) {
+    const plain = session({ name });
+    assert.equal(L.titleOf(plain), "app");
+    assert.equal(L.whereText(plain, true), "mac-mini · ~/app");
+    assert.equal(L.whereText(plain, false), "mac-mini");
+  }
+});

@@ -9,6 +9,7 @@
   "license": "MIT",
   "homepage": "https://github.com/crystaldust/lancekit/tree/main/plugins/session-board",
   "repository": "https://github.com/crystaldust/lancekit",
+  "types": "./types/index.d.ts",
   "userConfig": {
     "boardUrl": {
       "type": "string",

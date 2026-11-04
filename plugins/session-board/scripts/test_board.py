@@ -50,6 +50,14 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(parsed["state"], "working")
         self.assertEqual(parsed["detail"], "Bash: pnpm test")
         self.assertIsNone(parsed["ecc"])
+        self.assertIsNone(parsed["name"], "a report without a name has name null")
+
+    def test_keeps_a_session_name_and_treats_empty_as_none(self):
+        self.assertEqual(board.parse_report(encode(report(name="前端重构")))["name"], "前端重构")
+        self.assertIsNone(board.parse_report(encode(report(name="")))["name"])
+        self.assertIsNone(board.parse_report(encode(report(name=None)))["name"])
+        self.assertIsNone(board.parse_report(encode(report(name=" \u200b\n ")))["name"], "blank once tidied")
+        self.assertEqual(board.parse_report(encode(report(name="a\u202eb\t\tc\u0007")))["name"], "a b c")
 
     def test_rejects_reports_that_break_the_contract(self):
         bad = {
@@ -60,6 +68,8 @@ class ParseTest(unittest.TestCase):
             "bad time": report(since="2026-11-03 08:00:00"),
             "long host": report(host="h" * 65),
             "numeric cwd": report(cwd=3),
+            "long name": report(name="n" * 65),
+            "numeric name": report(name=7),
             "string ecc": report(ecc="x"),
             "negative done": report(ecc={"prd": {"title": "t", "done": -1, "total": 2, "inProgress": []},
                                          "plan": None, "phase": None, "isActive": False}),
@@ -363,6 +373,10 @@ class DemoTest(unittest.TestCase):
         self.assertEqual(states.count("your-turn"), 2)
         self.assertEqual(states.count("ended"), 1)
         self.assertEqual(sum(1 for _, _, alive in reports if not alive), 2, "lost and ended stop heartbeating")
+        named = {body["project"]: [] for _, body, _ in reports}
+        for _, body, _ in reports:
+            named[body["project"]].append(body["name"])
+        self.assertEqual(sorted(named["ai-video-platform"]), ["分镜导出", "角色参考图"], "one project, told apart by name")
 
     def test_demo_sessions_sort_like_the_design(self):
         import demo

@@ -235,6 +235,18 @@
     return cwd.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
   }
 
+  /** The card's title: the name given with /session-board name, else the project. */
+  function titleOf(session) {
+    return session.name || session.project;
+  }
+
+  /** The line under the title; the project moves here when a name took its place. */
+  function whereText(session, withPath) {
+    return [session.name ? session.project : null, session.host, withPath ? shortPath(session.cwd) : null]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
   function promptMessage(session) {
     return session.lastPrompt && session.lastPrompt.text
       ? { label: "最后交代", kind: "prompt", lines: [session.lastPrompt.text] }
@@ -275,7 +287,7 @@
 
   globalThis.BoardLogic = Object.freeze({
     KINDS, KIND_LABELS, kindOf, split, counts, hostCount, formatTimer, formatAgo, durationText,
-    eccText, isSnapshot, shortPath, messageOf, promptMessage, errorReason, syncText, clockText, timeText,
+    eccText, isSnapshot, shortPath, titleOf, whereText, messageOf, promptMessage, errorReason, syncText, clockText, timeText,
   });
 })();
 </script>
@@ -376,8 +388,8 @@
     top.append(badge, duration("timer num", session));
     const identity = el("div", "identity");
     identity.append(
-      el("div", "project ellipsis", session.project),
-      el("div", "where ellipsis", `${session.host} · ${L.shortPath(session.cwd)}`),
+      el("div", "project ellipsis", L.titleOf(session)),
+      el("div", "where ellipsis", L.whereText(session, true)),
     );
     card.append(top, identity);
     if (kind === "approval" && session.detail) card.append(el("div", "detail num ellipsis", session.detail));
@@ -392,7 +404,7 @@
     const stateLine = el("div", "state-line");
     stateLine.append(state, duration("duration num", session));
     const identity = el("div", "identity");
-    identity.append(el("div", "project ellipsis", session.project), el("div", "where ellipsis", session.host));
+    identity.append(el("div", "project ellipsis", L.titleOf(session)), el("div", "where ellipsis", L.whereText(session, false)));
     const card = el("article", `compact ${kind}`);
     card.append(stateLine, identity);
     const prompt = L.promptMessage(session);

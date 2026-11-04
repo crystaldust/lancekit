@@ -21,6 +21,7 @@ import socket
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,6 +56,7 @@ LIMITS = {
     "host": 64,
     "cwd": 512,
     "project": 128,
+    "name": 64,
     "detail": 200,
     "prompt": 2000,
     "tail_lines": 10,
@@ -64,6 +66,9 @@ LIMITS = {
     "milestone": 16,
     "milestones": 64,
 }
+
+
+HIDDEN_CATEGORIES = {"Cc", "Cf", "Zl", "Zp"}
 
 
 class ReportError(ValueError):
@@ -101,6 +106,13 @@ def _text(obj: dict, key: str, limit: int, *, name: str | None = None, optional:
     if len(value) > limit:
         raise ReportError(f"{label} is longer than {limit} characters")
     return value
+
+
+def _name(value: str | None) -> str | None:
+    """A session name for one line on the wall: controls and invisible format marks (bidi overrides,
+    zero-width spaces) read as spaces, whitespace collapsed; blank reads as no name."""
+    shown = "".join(" " if unicodedata.category(c) in HIDDEN_CATEGORIES else c for c in value or "")
+    return " ".join(shown.split()) or None
 
 
 def _count(obj: dict, key: str, label: str) -> int:
@@ -208,6 +220,7 @@ def parse_report(body: bytes) -> dict:
         "host": _text(raw, "host", LIMITS["host"]),
         "cwd": _text(raw, "cwd", LIMITS["cwd"]),
         "project": _text(raw, "project", LIMITS["project"]),
+        "name": _name(_text(raw, "name", LIMITS["name"], optional=True)),
         "state": raw["state"],
         "since": raw["since"],
         "sentAt": raw["sentAt"],

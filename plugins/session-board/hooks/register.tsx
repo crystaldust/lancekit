@@ -1,11 +1,19 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import { buildReport, boardSessionId, eccSummary, parseBoardUrl, sessionUrl } from './report'
+import { buildReport, boardSessionId, eccSummary, parseBoardUrl, projectName, sessionUrl } from './report'
 import type { Board, EccLive, EccPlan, EccPrd, EccSummary, Where } from './report'
-import { clip, enter, initialStatus, questionDetail, toolDetail, withAnswer, withPrompt } from './status'
+import { clip, enter, initialStatus, questionDetail, sessionName, toolDetail, withAnswer, withPrompt } from './status'
 import type { SessionState, Status } from './status'
 
 type $ = EngineInterface
+
+/** The session's name, kept by the host so a reload (a changed option, say) does not lose it. */
+const NAME = { plugin: 'session-board', key: 'name' } as const
+const USAGE = [
+  '/session-board              看连接状态，并立刻上报一次',
+  '/session-board name <名称>  给这个会话起名，大屏上显示名称而不是项目名',
+  '/session-board name         清除名称',
+].join('\n')
 
 const HEARTBEAT_MS = 5000
 /** How long an exiting session waits for its last report. */
@@ -110,11 +118,29 @@ async function apply($: $, r: Reporter, change: (status: Status, now: number) =>
   if (changed !== current) $.clock.after(0, () => send($, r))
 }
 
+/** Sets (or, for blank text, clears) the session's name, keeps it in state and reports it at once. */
+async function rename($: $, r: Reporter, text: string): Promise<string> {
+  const name = sessionName(text)
+  r.where = { ...r.where, name }
+  $.clock.after(0, () => send($, r))
+  const kept = await $.state.set(NAME, name).then(() => true, () => false)
+  const project = projectName(r.where.cwd)
+  const shown =
+    name !== null ? `名称已设为「${name}」`
+    : text.trim() !== '' ? `名称里没有能显示的字，已清除，大屏上显示项目名 ${project}`
+    : `名称已清除，大屏上显示项目名 ${project}`
+  return [
+    shown,
+    kept ? null : '名称没能保存：这次会话里有效，插件重新加载（比如改了选项）后会丢，需要重设。',
+    r.board === null ? '还没配置看板地址，配好后会一起上报。' : null,
+  ].filter(line => line !== null).join('\n')
+}
+
 export const register: Register = (on, options) => {
   const r: Reporter = {
     board: parseBoardUrl(String(options.boardUrl ?? ''), String(options.token ?? '')),
     status: null,
-    where: { host: 'unknown', cwd: '' },
+    where: { host: 'unknown', cwd: '', name: null },
     sessionId: null,
     approval: null,
     link: { attemptAt: null, okAt: null, error: null },
@@ -123,9 +149,10 @@ export const register: Register = (on, options) => {
   }
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'session-board', description: 'Show whether this session reaches the session board, and report now' })
+    await $.command.register({ name: 'session-board', description: 'Show whether this session reaches the session board; "name <名称>" names the session on the board' })
     const host = await $.process.run(['hostname', '-s']).then(r => r.stdout.trim(), () => '')
-    r.where = { host: host || 'unknown', cwd: e.cwd }
+    const kept = await $.state.get(NAME).then(read => read.value ?? null, () => null)
+    r.where = { host: host || 'unknown', cwd: e.cwd, name: kept }
     r.sessionId = null
     r.status = r.status ?? initialStatus(await $.clock.now())
     $.clock.every(HEARTBEAT_MS, () => (r.status?.state === 'ended' ? undefined : send($, r)))
@@ -202,7 +229,10 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  on('command.run', { command: 'session-board' }, async $ => {
+  on('command.run', { command: 'session-board' }, async ($, e) => {
+    const [sub = '', ...rest] = e.args.trim().split(/\s+/)
+    if (sub === 'name') return { text: await rename($, r, rest.join(' ')) }
+    if (sub !== '') return { text: `不认识的参数：${clip(sub, 40)}\n${USAGE}` }
     const { board } = r
     if (board === null) {
       return {
@@ -217,6 +247,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const lines = [
       `看板  ${board.base}${board.token ? '' : '（没有令牌，看板会拒绝）'}`,
+      `名称  ${r.where.name ?? `（未设置，显示项目名 ${projectName(r.where.cwd)}）`}`,
       `状态  ${r.status ? `${STATE_NAMES[r.status.state]}（自 ${clock(r.status.since)}）` : '未知'}`,
       r.link.error === null && r.link.okAt !== null
         ? `上报  成功，${Math.round((now - r.link.okAt) / 1000)} 秒前`

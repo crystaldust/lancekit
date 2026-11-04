@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { HttpResponse, On } from 'claude-code'
 
-import { answerTail, clip, toolDetail } from './status'
+import { answerTail, clip, sessionName, toolDetail } from './status'
 import { boardSessionId, eccSummary, parseBoardUrl } from './report'
 
 const BOARD = { options: { boardUrl: 'http://board.lan:7777/?token=secret', token: '' } }
@@ -22,11 +22,15 @@ type World = {
   respond: (post: Post) => HttpResponse | { deny: string } | Promise<HttpResponse>
   sessionId: string
   ecc: Record<string, unknown>
+  /** session-board's own $.state values, as the host holds them across a reload. */
+  mine: Record<string, unknown>
+  /** When set, writes to $.state are refused with this reason. */
+  stateDeny: string | null
 }
 
 /** The engine beneath the plugin: a board that records each POST, a host, a session. */
 function world(on: On): World {
-  const w: World = { posts: [], respond: () => OK, sessionId: 'session-one', ecc: {} }
+  const w: World = { posts: [], respond: () => OK, sessionId: 'session-one', ecc: {}, mine: {}, stateDeny: null }
   on('http.fetch', async (_, e) => {
     const post = { url: e.url, headers: e.init?.headers ?? {}, body: JSON.parse(e.init?.body ?? '{}') }
     w.posts.push(post)
@@ -38,8 +42,15 @@ function world(on: On): World {
   }))
   on('session.id', () => ({ value: w.sessionId }))
   on('state.get', (_, e) => {
-    const value = w.ecc[(e as { key: string }).key]
+    const { plugin, key } = e as { plugin: string; key: string }
+    const value = (plugin === 'session-board' ? w.mine : w.ecc)[key]
     return { value: { value, version: value === undefined ? 0 : 1 } }
+  })
+  on('state.set', (_, e) => {
+    if (w.stateDeny !== null) return { deny: w.stateDeny }
+    const { plugin, key, value } = e as { plugin: string; key: string; value: unknown }
+    if (plugin === 'session-board') w.mine[key] = value
+    return { value: { isSet: true, version: 2 } }
   })
   on('command.register', () => ({ value: { command: 'session-board' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -333,4 +344,107 @@ test('cutting text never leaves half an emoji behind', () => {
   expect(clip('abc', 2)).toBe('ab')
   const tail = answerTail('x'.repeat(499) + '😀')
   expect(tail[0]).toBe('x'.repeat(499))
+})
+
+const named = (args: string) => ({ ...COMMAND, args })
+
+test('/session-board name sets a name the board shows, reported at once, and clears it', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  expect(last(w).name).toBe(null)
+
+  const set = await $.command.run(named('name   前端   重构  '))
+  await clock.settle()
+  expect(set.text).toContain('名称已设为「前端 重构」')
+  expect(last(w).name).toBe('前端 重构')
+  expect(w.mine.name).toBe('前端 重构')
+  expect((await $.command.run(COMMAND)).text).toContain('名称  前端 重构')
+
+  await clock.advance(5000)
+  expect(last(w).name).toBe('前端 重构')
+
+  const cleared = await $.command.run(named('name'))
+  await clock.settle()
+  expect(cleared.text).toContain('名称已清除')
+  expect(last(w).name).toBe(null)
+  expect((await $.command.run(COMMAND)).text).toContain('名称  （未设置，显示项目名 app）')
+})
+
+test('a name kept in state outlives a reload and carries over to the session after /clear', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.mine.name = '接口联调'
+  await start($, clock)
+  expect(last(w).name).toBe('接口联调')
+
+  w.sessionId = 'session-two'
+  await $.session.end({ reason: 'clear', sessionId: 'session-one', resume: { id: 'session-one' } })
+  await clock.settle()
+  expect(w.posts.map(p => [p.url.split('/').pop(), p.body.name]).slice(-2)).toEqual([
+    ['session-one', '接口联调'],
+    ['session-two', '接口联调'],
+  ])
+})
+
+test('/session-board with an unknown argument shows how to use it', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  world(on)
+  await start($, clock)
+  const ran = await $.command.run(named('rename x'))
+  expect(ran.text).toContain('/session-board name <名称>')
+})
+
+test('a name works without a board URL too, and is sent once one is set', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  expect((await $.command.run(named('name docs'))).text).toContain('名称已设为「docs」')
+  expect(w.posts).toEqual([])
+})
+
+test('names are tidied and cut to 40 characters', () => {
+  expect(sessionName('  a \t\n b  ')).toBe('a b')
+  expect(sessionName('   ')).toBe(null)
+  expect(sessionName('x'.repeat(50))).toBe('x'.repeat(40))
+  expect(sessionName('名'.repeat(39) + '😀')).toBe('名'.repeat(39))
+  expect(sessionName('a\u0000b\u202Ec')).toBe('a b c')
+})
+
+test('a name set while a report is still out goes out right after it', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  let release = () => {}
+  await start($, clock)
+  w.respond = () => new Promise<HttpResponse>(resolve => { release = () => resolve(OK) })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.settle()
+  expect(last(w).name).toBe(null)
+
+  await $.command.run(named('name 联调'))
+  w.respond = () => OK
+  release()
+  await clock.settle()
+  expect(last(w).name).toBe('联调')
+  expect(last(w).state).toBe('working')
+})
+
+test('a name that cannot be kept still applies, and the reply says so', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.stateDeny = 'state is read-only here'
+  await start($, clock)
+  const ran = await $.command.run(named('name 临时'))
+  await clock.settle()
+  expect(ran.text).toContain('名称已设为「临时」')
+  expect(ran.text).toContain('名称没能保存')
+  expect(last(w).name).toBe('临时')
+})
+
+test('a name of only hidden characters is cleared, and the reply says why', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  world(on)
+  await start($, clock)
+  const ran = await $.command.run(named('name \u200b\u202e'))
+  expect(ran.text).toContain('名称里没有能显示的字，已清除')
 })

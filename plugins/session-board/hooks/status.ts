@@ -17,6 +17,10 @@ export const DETAIL_CHARS = 200
 export const PROMPT_CHARS = 2000
 export const TAIL_LINES = 10
 export const TAIL_LINE_CHARS = 500
+export const NAME_CHARS = 40
+
+/** Control characters and the invisible marks that reorder or hide text; a name shows none of them. */
+const HIDDEN_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g
 
 /**
  * `text` cut to at most `max` UTF-16 units without splitting a surrogate pair:
@@ -74,4 +78,10 @@ export function questionDetail(input: unknown): string {
   const first = Array.isArray(questions) ? questions[0]?.question : undefined
   const line = typeof first === 'string' && first.trim() !== '' ? `提问: ${first.trim()}` : '提问'
   return clip(line.replace(/\s+/g, ' '), DETAIL_CHARS)
+}
+
+/** The name a person gives the session, tidied for one line on the board; null for none. */
+export function sessionName(text: string): string | null {
+  const tidy = text.replace(HIDDEN_CHARS, ' ').replace(/\s+/g, ' ').trim()
+  return tidy === '' ? null : clip(tidy, NAME_CHARS).trim()
 }
