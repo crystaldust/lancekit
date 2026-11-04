@@ -349,5 +349,32 @@ class UrlTest(unittest.TestCase):
         self.assertFalse(any("0.0.0.0" in url for url in urls))
 
 
+class DemoTest(unittest.TestCase):
+    def test_every_demo_report_passes_validation(self):
+        import demo
+
+        reports = demo.build_reports(T0)
+        self.assertEqual(len(reports), 10)
+        states = []
+        for _, body, _ in reports:
+            parsed = board.parse_report(encode(body))
+            states.append(parsed["state"])
+        self.assertEqual(states.count("needs-approval"), 2)
+        self.assertEqual(states.count("your-turn"), 2)
+        self.assertEqual(states.count("ended"), 1)
+        self.assertEqual(sum(1 for _, _, alive in reports if not alive), 2, "lost and ended stop heartbeating")
+
+    def test_demo_sessions_sort_like_the_design(self):
+        import demo
+
+        clock = FakeClock()
+        b = board.Board(clock=clock)
+        for sid, body, _ in demo.build_reports(T0):
+            b.accept(sid, board.parse_report(encode(body)))
+        order = [s["sessionId"] for s in b.snapshot()["sessions"]]
+        self.assertEqual(order[:4], ["demo-ai-video", "demo-lancekit", "demo-novel-skills", "demo-homelab"])
+        self.assertEqual(order[-1], "demo-notes")
+
+
 if __name__ == "__main__":
     unittest.main()

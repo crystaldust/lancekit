@@ -1,68 +1,534 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Session board</title>
 <style>
-  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6e6e73; --line: #d2d2d7; --alert: #b3261e; }
-  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --bg: #161617; --muted: #a1a1a6; --line: #3a3a3c; --alert: #ff6b5f; } }
-  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
-  p.note { color: var(--muted); margin: 0 0 12px; }
-  p.error { color: var(--alert); font-weight: 600; margin: 0 0 12px; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--muted); font-weight: 500; }
+  :root {
+    color-scheme: dark;
+    --bg: #0B0E13; --surface: #151A22; --text: #EDF1F7; --muted: #8E99AB; --faint: #5B6577;
+    --approval: #FFB224; --approval-bg: #2A2110; --turn: #4CB4FF; --turn-bg: #0F2233;
+    --working: #46C882; --lost: #F2555A; --error-bg: #3A1416;
+    --font-ui: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --font-num: "JetBrains Mono", "SF Mono", Menlo, Consolas, "Noto Sans SC", "PingFang SC", monospace;
+  }
+  /* The design is 1920x1080 at 16px per rem; scale it to whichever side of the screen is tighter. */
+  html { font-size: max(8px, min(calc(100vw / 120), calc(100vh / 67.5))); }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: var(--font-ui); font-size: 1.125rem; line-height: 1.4;
+  }
+  .page { height: 100vh; display: flex; flex-direction: column; gap: 1.75rem; padding: 2rem 2.5rem 2.5rem; }
+  .page.stale main { opacity: 0.4; }
+  .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+  .ellipsis { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+
+  header { display: flex; align-items: center; justify-content: space-between; gap: 2rem; flex: none; }
+  .title-group, .counts, .status-group { display: flex; align-items: center; }
+  .title-group { gap: 2rem; min-width: 0; }
+  .counts { gap: 1.5rem; }
+  .status-group { gap: 1.5rem; flex: none; }
+  h1 { margin: 0; font-size: 1.875rem; font-weight: 700; white-space: nowrap; }
+  .count { display: flex; align-items: center; gap: 0.625rem; color: var(--muted); font-size: 1.375rem; font-weight: 500; white-space: nowrap; }
+  .dot { width: 0.75rem; height: 0.75rem; border-radius: 50%; flex: none; background: currentColor; }
+  .count .dot { color: var(--dot); }
+  .sync { color: var(--faint); font-size: 1.25rem; white-space: nowrap; }
+  .clock { font-size: 1.875rem; font-weight: 600; }
+
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 1.75rem; }
+  section { display: flex; flex-direction: column; gap: 1rem; min-height: 0; }
+  section.others { flex: 1; }
+  .section-head { display: flex; align-items: center; gap: 0.875rem; flex: none; }
+  h2 { margin: 0; color: var(--muted); font-size: 1.5rem; font-weight: 700; }
+  .hint { color: var(--faint); font-size: 1.125rem; }
+  .nobody { color: var(--faint); font-size: 1.375rem; padding: 0.5rem 0; }
+
+  .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.25rem; min-height: 0; overflow: hidden; }
+  .waiting .grid { grid-auto-rows: 35rem; max-height: 35.5rem; }
+  .waiting.dense .grid { grid-auto-rows: 17.125rem; }
+  .others .grid { flex: 1; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-auto-rows: minmax(15rem, 17rem); gap: 1rem; }
+
+  .card {
+    --accent: var(--muted);
+    display: flex; flex-direction: column; gap: 1.125rem; min-width: 0; min-height: 0; overflow: hidden;
+    padding: 1.5rem 1.75rem; border-radius: 0.875rem; border-top: 0.375rem solid var(--accent);
+  }
+  .card.approval { --accent: var(--approval); background: var(--approval-bg); }
+  .card.turn { --accent: var(--turn); background: var(--turn-bg); }
+  .card .top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex: none; }
+  .badge {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.875rem; border-radius: 999px;
+    background: var(--accent); color: var(--bg); font-size: 1.25rem; font-weight: 700; white-space: nowrap;
+  }
+  .badge svg { width: 1.25rem; height: 1.25rem; }
+  .timer { color: var(--accent); font-size: 4rem; font-weight: 700; line-height: 1; white-space: nowrap; }
+  .identity { display: flex; flex-direction: column; gap: 0.375rem; flex: none; min-width: 0; }
+  .project { font-size: 2.375rem; font-weight: 700; line-height: 1.15; }
+  .where { color: var(--muted); font-size: 1.125rem; }
+  .detail {
+    flex: none; padding: 0.75rem 1rem; border-radius: 0.5rem; background: #00000055;
+    color: var(--accent); font-size: 1.375rem; font-weight: 500;
+  }
+  .message { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden; }
+  .label { flex: none; color: var(--faint); font-size: 1rem; font-weight: 600; letter-spacing: 0.0625rem; }
+  .prompt {
+    font-size: 1.375rem; line-height: 1.45; overflow: hidden; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 7;
+  }
+  /* The end of an answer matters most: keep the newest lines and let older ones fall off the top. */
+  .tail { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
+  .tail div { color: var(--muted); font-size: 1.1875rem; line-height: 1.4; overflow-wrap: anywhere; flex: none; }
+  .tail div:last-child { color: var(--text); }
+  .ecc { display: flex; flex-direction: column; gap: 0.625rem; flex: none; }
+  .ecc-line { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .ecc-text { font-size: 1.25rem; font-weight: 600; }
+  .ecc-phase { color: var(--accent); font-size: 1.125rem; font-weight: 600; flex: none; }
+  .track { height: 0.5rem; border-radius: 0.25rem; background: #FFFFFF1A; overflow: hidden; }
+  .fill { height: 100%; border-radius: inherit; background: var(--accent); }
+  .ecc-none { color: var(--faint); font-size: 1.125rem; }
+
+  .waiting.dense .card { gap: 0.75rem; padding: 1.25rem 1.5rem; }
+  .waiting.dense .timer { font-size: 3rem; }
+  .waiting.dense .project { font-size: 1.875rem; }
+  .waiting.dense .message, .waiting.dense .track, .waiting.dense .ecc-none { display: none; }
+
+  .compact {
+    --accent: var(--working);
+    display: flex; flex-direction: column; gap: 0.625rem; min-width: 0; min-height: 0; overflow: hidden;
+    padding: 1.125rem 1.25rem; border-radius: 0.75rem; background: var(--surface);
+  }
+  .compact.lost { --accent: var(--lost); opacity: 0.75; }
+  .compact.ended { --accent: var(--faint); opacity: 0.5; }
+  .compact .state-line { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex: none; }
+  .compact .state { display: flex; align-items: center; gap: 0.5rem; color: var(--accent); font-size: 1.125rem; font-weight: 600; white-space: nowrap; }
+  .compact .duration { color: var(--muted); font-size: 1.25rem; font-weight: 600; white-space: nowrap; }
+  .compact .identity { gap: 0.125rem; }
+  .compact .project { font-size: 1.625rem; line-height: 1.2; }
+  .compact .where { color: var(--faint); font-size: 1rem; }
+  .compact .prompt { color: var(--muted); font-size: 1.125rem; line-height: 1.4; -webkit-line-clamp: 3; flex: none; }
+  .compact .spacer { flex: 1; }
+  .compact .ecc-text { font-size: 1rem; }
+  .compact .track { height: 0.375rem; border-radius: 0.1875rem; background: #FFFFFF14; }
+  .more { display: flex; align-items: center; justify-content: center; border-radius: 0.75rem; background: var(--surface); color: var(--muted); font-size: 1.5rem; font-weight: 600; }
+
+  .empty {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.875rem;
+    border-radius: 0.875rem; background: var(--surface); text-align: center; padding: 2rem;
+  }
+  .empty svg { width: 3.5rem; height: 3.5rem; color: var(--faint); }
+  .empty h2 { color: var(--text); font-size: 2.125rem; }
+  .empty p { margin: 0; color: var(--muted); font-size: 1.25rem; }
+  .empty .address { color: var(--turn); font-size: 1.375rem; }
+
+  .banner {
+    position: fixed; top: 1.25rem; left: 2.5rem; right: 2.5rem; z-index: 1;
+    display: flex; align-items: center; gap: 0.875rem; padding: 0.875rem 1.25rem; border-radius: 0.625rem;
+    background: var(--error-bg); border: 2px solid var(--lost); color: var(--lost); font-size: 1.375rem; font-weight: 600;
+  }
+  .banner svg { width: 1.75rem; height: 1.75rem; flex: none; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
-<p class="note">Placeholder board — Phase 3 replaces this page.</p>
-<p class="error" id="error" hidden></p>
-<table>
-  <thead><tr><th>Project</th><th>Host</th><th>State</th><th>Waiting since</th><th>Last prompt</th></tr></thead>
-  <tbody id="rows"></tbody>
-</table>
-<script>
-  const POLL_MS = 2000;
-  const PROMPT_CHARS = 80;
-  const token = new URLSearchParams(location.search).get("token") || "";
-  const errorLine = document.getElementById("error");
-  const rows = document.getElementById("rows");
+<div class="page" id="page">
+  <header>
+    <div class="title-group">
+      <h1>Session board</h1>
+      <div class="counts" id="counts"></div>
+    </div>
+    <div class="status-group">
+      <span class="sync" id="sync"></span>
+      <span class="clock num" id="clock"></span>
+    </div>
+  </header>
+  <main id="main"></main>
+</div>
+<div class="banner" id="banner" role="alert" hidden></div>
 
-  function cell(text) {
-    const td = document.createElement("td");
-    td.textContent = text;
-    return td;
+<script id="board-logic">
+"use strict";
+// Pure helpers: no DOM, so web/page.test.mjs can run them in node.
+(() => {
+  const SECOND = 1000;
+  const MINUTE = 60 * SECOND;
+  const HOUR = 60 * MINUTE;
+  const TAIL_SHOWN = 4;
+  const WAITING_STATES = new Set(["needs-approval", "your-turn"]);
+  const KINDS = ["approval", "turn", "working", "lost", "ended"];
+  const KIND_LABELS = { approval: "等批准", turn: "轮到你", working: "工作中", lost: "失联", ended: "已退出" };
+
+  function kindOf(session) {
+    if (session.state === "ended") return "ended";
+    if (session.isLost) return "lost";
+    if (session.state === "needs-approval") return "approval";
+    if (session.state === "your-turn") return "turn";
+    return "working";
   }
 
-  function render(sessions) {
-    rows.replaceChildren(...sessions.map(s => {
-      const tr = document.createElement("tr");
-      tr.append(
-        cell(s.project),
-        cell(s.host),
-        cell(s.isLost ? "lost" : s.state),
-        cell(new Date(s.waitingSince).toLocaleTimeString()),
-        cell(s.lastPrompt ? s.lastPrompt.text.slice(0, PROMPT_CHARS) : ""),
-      );
-      return tr;
+  /** Waiting cards and the rest, each in the order the server sent them. */
+  function split(sessions) {
+    const isWaiting = s => !s.isLost && WAITING_STATES.has(s.state);
+    return { waiting: sessions.filter(isWaiting), others: sessions.filter(s => !isWaiting(s)) };
+  }
+
+  function counts(sessions) {
+    const result = Object.fromEntries(KINDS.map(kind => [kind, 0]));
+    for (const session of sessions) result[kindOf(session)] += 1;
+    return result;
+  }
+
+  function hostCount(sessions) {
+    return new Set(sessions.map(s => s.host)).size;
+  }
+
+  const pad = n => String(n).padStart(2, "0");
+
+  function formatTimer(ms) {
+    const total = Math.max(0, Math.floor(ms / SECOND));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
+  }
+
+  function formatAgo(ms) {
+    const value = Math.max(0, ms);
+    if (value < MINUTE) return `${Math.floor(value / SECOND)} 秒`;
+    if (value < HOUR) return `${Math.floor(value / MINUTE)} 分钟`;
+    return `${Math.floor(value / HOUR)} 小时`;
+  }
+
+  function durationText(session, nowMs) {
+    const kind = kindOf(session);
+    if (kind === "lost") return formatAgo(nowMs - Date.parse(session.receivedAt));
+    if (kind === "ended") return `${formatAgo(nowMs - Date.parse(session.waitingSince))}前`;
+    return formatTimer(nowMs - Date.parse(session.waitingSince));
+  }
+
+  function ratio(part) {
+    return part && part.total > 0 ? Math.min(1, part.done / part.total) : 0;
+  }
+
+  function eccText(ecc) {
+    if (!ecc || (!ecc.prd && !ecc.plan)) return null;
+    const pieces = [];
+    if (ecc.prd) {
+      const running = ecc.prd.inProgress && ecc.prd.inProgress.length ? ` ▶${ecc.prd.inProgress.join(",")}` : "";
+      pieces.push(`PRD M${ecc.prd.done}/${ecc.prd.total}${running}`);
+    }
+    if (ecc.plan) pieces.push(`T${ecc.plan.done}/${ecc.plan.total}`);
+    return {
+      text: pieces.join(" · "),
+      phase: ecc.isActive && ecc.phase ? ecc.phase : null,
+      fraction: ecc.plan && ecc.plan.total > 0 ? ratio(ecc.plan) : ratio(ecc.prd),
+    };
+  }
+
+  /** A summary response we can render: sessions is an array and now is a real time. */
+  function isSnapshot(data) {
+    return Boolean(data) && Array.isArray(data.sessions) && Number.isFinite(Date.parse(data.now));
+  }
+
+  function shortPath(cwd) {
+    return cwd.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
+  }
+
+  function promptMessage(session) {
+    return session.lastPrompt && session.lastPrompt.text
+      ? { label: "最后交代", kind: "prompt", lines: [session.lastPrompt.text] }
+      : null;
+  }
+
+  /** What a big card shows under its title: the answer tail for your-turn, else the last instruction. */
+  function messageOf(session) {
+    if (session.state === "your-turn" && session.lastAnswer) {
+      const lines = session.lastAnswer.tail.filter(line => line.trim() !== "");
+      if (lines.length) return { label: "最后回答", kind: "tail", lines: lines.slice(-TAIL_SHOWN) };
+    }
+    return promptMessage(session);
+  }
+
+  function errorReason(error) {
+    if (error && error.name === "TimeoutError") return "超时没有回应";
+    if (error && error.message === "bad response") return "响应格式不对";
+    const match = /^HTTP (\d{3})$/.exec(error && error.message ? error.message : "");
+    if (!match) return "网络不通";
+    const status = Number(match[1]);
+    if (status === 401) return "HTTP 401：令牌不对";
+    if (status >= 500) return `HTTP ${status}：服务出错`;
+    return `HTTP ${status}`;
+  }
+
+  function syncText(hosts, agoMs) {
+    return `${hosts} 台机器 · ${Math.floor(Math.max(0, agoMs) / SECOND)} 秒前更新`;
+  }
+
+  function clockText(date) {
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function timeText(date) {
+    return `${clockText(date)}:${pad(date.getSeconds())}`;
+  }
+
+  globalThis.BoardLogic = Object.freeze({
+    KINDS, KIND_LABELS, kindOf, split, counts, hostCount, formatTimer, formatAgo, durationText,
+    eccText, isSnapshot, shortPath, messageOf, promptMessage, errorReason, syncText, clockText, timeText,
+  });
+})();
+</script>
+
+<script>
+"use strict";
+(() => {
+  const L = globalThis.BoardLogic;
+  const POLL_MS = 2000;
+  const TICK_MS = 1000;
+  const FETCH_TIMEOUT_MS = 4000;
+  const RESIZE_DEBOUNCE_MS = 150;
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const DOT_COLORS = { approval: "--approval", turn: "--turn", working: "--working", lost: "--lost", ended: "--faint" };
+  // Lucide icons (ISC licence): fixed markup, never built from session data.
+  const ICONS = {
+    approval: ["M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z", "M12 8v4", "M12 16h.01"],
+    turn: ["M7.9 20A9 9 0 1 0 4 16.1L2 22Z"],
+    empty: ["M12 17v4", "M8 21h8", "M22 12v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11", "M22 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"],
+    offline: ["M12 20h.01", "M8.5 16.429a5 5 0 0 1 7 0", "M5 12.859a10 10 0 0 1 5.17-2.69", "M19 12.859a10 10 0 0 0-2.007-1.523", "M2 8.82a15 15 0 0 1 4.177-2.643", "M22 8.82a15 15 0 0 0-11.288-3.764", "m2 2 20 20"],
+  };
+  const SVG_ATTRS = { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" };
+
+  const token = new URLSearchParams(location.search).get("token") || "";
+  const page = document.getElementById("page");
+  const main = document.getElementById("main");
+  const banner = document.getElementById("banner");
+  const countsBox = document.getElementById("counts");
+  const syncLine = document.getElementById("sync");
+  const clock = document.getElementById("clock");
+
+  let sessions = null;  // last good snapshot, kept while the server is unreachable
+  let renderedKey = "";
+  let skewMs = 0;       // server clock minus this screen's clock
+  let lastOkAt = 0;
+  let timers = [];      // [{el, session}], refreshed every second
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function icon(name) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    for (const [key, value] of Object.entries(SVG_ATTRS)) svg.setAttribute(key, value);
+    for (const d of ICONS[name]) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  function duration(className, session) {
+    const node = el("span", className);
+    timers.push({ el: node, session });
+    return node;
+  }
+
+  function eccBlock(session, isBig) {
+    const summary = L.eccText(session.ecc);
+    if (!summary) return isBig ? el("div", "ecc-none", "没有 ECC 进度") : null;
+    const line = el("div", "ecc-line");
+    line.append(el("span", "ecc-text num ellipsis", summary.text));
+    if (isBig && summary.phase) line.append(el("span", "ecc-phase num", summary.phase));
+    const fill = el("div", "fill");
+    fill.style.width = `${Math.round(summary.fraction * 100)}%`;
+    const track = el("div", "track");
+    track.append(fill);
+    const block = el("div", "ecc");
+    block.append(line, track);
+    return block;
+  }
+
+  function messageBlock(session) {
+    const block = el("div", "message");
+    const message = L.messageOf(session);
+    if (!message) return block;
+    block.append(el("div", "label", message.label));
+    if (message.kind === "tail") {
+      const tail = el("div", "tail num");
+      tail.append(...message.lines.map(line => el("div", "", line)));
+      block.append(tail);
+    } else {
+      block.append(el("div", "prompt", message.lines[0]));
+    }
+    return block;
+  }
+
+  function bigCard(session) {
+    const kind = L.kindOf(session);
+    const card = el("article", `card ${kind}`);
+    const badge = el("span", "badge");
+    badge.append(icon(kind), el("span", "", L.KIND_LABELS[kind]));
+    const top = el("div", "top");
+    top.append(badge, duration("timer num", session));
+    const identity = el("div", "identity");
+    identity.append(
+      el("div", "project ellipsis", session.project),
+      el("div", "where ellipsis", `${session.host} · ${L.shortPath(session.cwd)}`),
+    );
+    card.append(top, identity);
+    if (kind === "approval" && session.detail) card.append(el("div", "detail num ellipsis", session.detail));
+    card.append(messageBlock(session), eccBlock(session, true));
+    return card;
+  }
+
+  function compactCard(session) {
+    const kind = L.kindOf(session);
+    const state = el("span", "state");
+    state.append(el("span", "dot"), el("span", "", L.KIND_LABELS[kind]));
+    const stateLine = el("div", "state-line");
+    stateLine.append(state, duration("duration num", session));
+    const identity = el("div", "identity");
+    identity.append(el("div", "project ellipsis", session.project), el("div", "where ellipsis", session.host));
+    const card = el("article", `compact ${kind}`);
+    card.append(stateLine, identity);
+    const prompt = L.promptMessage(session);
+    if (prompt) card.append(el("div", "prompt", prompt.lines[0]));
+    card.append(el("div", "spacer"));
+    const ecc = eccBlock(session, false);
+    if (ecc) card.append(ecc);
+    return card;
+  }
+
+  /** Drop trailing cards until the grid fits, putting one "另有 N 个" tile in their place. */
+  function fitGrid(grid) {
+    const overflows = () => grid.scrollHeight > grid.clientHeight + 1;
+    if (!overflows() || grid.children.length < 2) return;
+    const more = el("div", "more");
+    grid.append(more);
+    let hidden = 0;
+    // Always keep at least one real card beside the tile.
+    while (grid.children.length > 2 && (hidden === 0 || overflows())) {
+      more.previousElementSibling.remove();
+      hidden += 1;
+    }
+    more.textContent = `另有 ${hidden} 个`;
+  }
+
+  function section(className, title, hint) {
+    const head = el("div", "section-head");
+    head.append(el("h2", "", title));
+    if (hint) head.append(el("span", "hint", hint));
+    const box = el("section", className);
+    box.append(head);
+    return box;
+  }
+
+  function renderCounts(list) {
+    const counts = L.counts(list);
+    countsBox.replaceChildren(...L.KINDS.map(kind => {
+      const dot = el("span", "dot");
+      dot.style.setProperty("--dot", `var(${DOT_COLORS[kind]})`);
+      const item = el("span", "count");
+      item.append(dot, el("span", "", `${L.KIND_LABELS[kind]} ${counts[kind]}`));
+      return item;
     }));
+  }
+
+  function renderEmpty() {
+    const empty = el("div", "empty");
+    empty.append(
+      icon("empty"),
+      el("h2", "", "还没有会话上报"),
+      el("p", "", "在各台机器上装好 session-board 插件，并在 /config 里填看板地址和令牌"),
+      el("p", "address num", location.origin),
+    );
+    main.replaceChildren(empty);
+  }
+
+  function render(list) {
+    timers = [];
+    renderCounts(list);
+    if (list.length === 0) {
+      renderEmpty();
+      return;
+    }
+    const { waiting, others } = L.split(list);
+    const waitingBox = section("waiting", "等你处理", "等批准在前；同类里等得越久越靠左");
+    if (waiting.length) {
+      waitingBox.classList.toggle("dense", waiting.length > 4);
+      const grid = el("div", "grid");
+      grid.append(...waiting.map(bigCard));
+      waitingBox.append(grid);
+    } else {
+      waitingBox.append(el("div", "nobody", "现在没有会话在等你"));
+    }
+    const othersBox = section("others", "其他会话");
+    const othersGrid = el("div", "grid");
+    othersGrid.append(...others.map(compactCard));
+    othersBox.append(othersGrid);
+    main.replaceChildren(waitingBox, othersBox);
+    for (const grid of main.querySelectorAll(".grid")) fitGrid(grid);
+    timers = timers.filter(timer => timer.el.isConnected);
+  }
+
+  function tick() {
+    const now = Date.now() + skewMs;
+    for (const timer of timers) timer.el.textContent = L.durationText(timer.session, now);
+    clock.textContent = L.clockText(new Date());
+    syncLine.textContent = sessions ? L.syncText(L.hostCount(sessions), Date.now() - lastOkAt) : "";
+  }
+
+  function showError(error) {
+    const since = lastOkAt ? ` · 下面是 ${L.timeText(new Date(lastOkAt))} 的数据` : "";
+    banner.replaceChildren(icon("offline"), el("span", "", `连不上看板服务（${L.errorReason(error)}）${since}`));
+    banner.hidden = false;
+    page.classList.add("stale");
   }
 
   async function poll() {
     try {
-      const response = await fetch("/api/sessions", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      const response = await fetch("/api/sessions", {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      render((await response.json()).sessions);
-      errorLine.hidden = true;
+      const data = await response.json();
+      if (!L.isSnapshot(data)) throw new Error("bad response");
+      // Heartbeats only move receivedAt; skip the rebuild when nothing visible changed.
+      const key = JSON.stringify(data.sessions.map(({ receivedAt, ...rest }) => rest));
+      if (key !== renderedKey) {
+        render(data.sessions);
+        renderedKey = key;
+      }
+      skewMs = Date.parse(data.now) - Date.now();
+      lastOkAt = Date.now();
+      sessions = data.sessions;
+      banner.hidden = true;
+      page.classList.remove("stale");
     } catch (error) {
-      errorLine.textContent = `Cannot load sessions: ${error.message}`;
-      errorLine.hidden = false;
+      showError(error);
     }
+    tick();
+    // Chain instead of setInterval so a slow server never has two requests in flight.
+    setTimeout(poll, POLL_MS);
   }
 
+  let resizeTimer = 0;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (sessions) render(sessions);
+      tick();
+    }, RESIZE_DEBOUNCE_MS);
+  });
   poll();
-  setInterval(poll, POLL_MS);
+  setInterval(tick, TICK_MS);
+})();
 </script>
 </body>
 </html>
