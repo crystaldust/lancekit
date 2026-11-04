@@ -50,11 +50,16 @@ lancekit 新增插件 `session-board`，由两部分组成：
 
 ## Open Questions
 
-- [ ] 会话在 `AskUserQuestion` 弹出的问题上等你回答时，能不能和"等批准"一样准确识别？需要在 Phase 2 确认对应的事件。
-- [ ] 心跳间隔和失联判定阈值取多少（初定每 5 秒心跳、30 秒无心跳算失联）？
-- [ ] 会话 ID 在 `/clear`、resume 之后是否变化？大屏上应显示为同一张卡片还是新卡片？
+- [x] 会话在 `AskUserQuestion` 弹出的问题上等你回答时，能不能和"等批准"一样准确识别？需要在 Phase 2 确认对应的事件。
+  → 能。主会话的 `AskUserQuestion` 在 `tool.call` 进入时标为等批准（detail 为"提问: …"），回答后回到工作中（Phase 2）。
+- [x] 心跳间隔和失联判定阈值取多少（初定每 5 秒心跳、30 秒无心跳算失联）？
+  → 按初定值：5 秒心跳、30 秒失联，已退出保留 10 分钟、失联保留 1 小时（契约 Timing）。一天试用后按数据再定。
+- [x] 会话 ID 在 `/clear`、resume 之后是否变化？大屏上应显示为同一张卡片还是新卡片？
+  → 会变。旧卡片标为已退出，新 ID 出一张新卡片（Phase 2，契约 Session ID）。
 - [ ] 一台机器上同一项目开了多个会话时，卡片怎么区分（项目名 + 会话 ID 前几位，还是终端标题）？
-- [ ] 看板服务重启后，各会话的状态要不要保留，还是等下一次心跳重新上报？
+  → v1 只显示项目名、机器名和工作目录，同一目录的两个会话卡片看起来一样，靠最后交代区分。一天试用后决定要不要加会话 ID 前几位。
+- [x] 看板服务重启后，各会话的状态要不要保留，还是等下一次心跳重新上报？
+  → 不保留，状态只在内存里，各会话在下一次心跳（≤ 5 秒）时重新出现（契约 Timing）。
 
 ---
 
@@ -159,7 +164,7 @@ lancekit 新增插件 `session-board`，由两部分组成：
 | 1 | 状态契约与看板服务 | 定稿会话状态 JSON 契约；Python 看板服务：令牌校验、接收上报、汇总、失联判定、`GET /api/sessions` | complete | - | - | .claude/PRPs/plans/completed/session-board-server.plan.md · report: .claude/PRPs/reports/session-board-server-report.md |
 | 2 | 会话上报 mod | 从事件推导状态、读取 ecc-progress 进度、状态变化即时上报加心跳、`userConfig`、`/session-board` 连接状态 | complete | with 3 | 1 | .claude/PRPs/plans/completed/session-board-reporter.plan.md · report: .claude/PRPs/reports/session-board-reporter-report.md |
 | 3 | 大屏页面 | 先出页面设计，再实现：按等待排序的会话卡片、高亮、等待时长、最后交代和回答、ECC 进度 | complete | with 2 | 1 | .claude/PRPs/plans/completed/session-board-page.plan.md · design: designs/session-board.pen · report: .claude/PRPs/reports/session-board-page-report.md |
-| 4 | 端到端验收与文档 | 两台机器、约 10 个会话连续使用一天，核对 Success Metrics；README 中英文更新 | pending | - | 2, 3 | - |
+| 4 | 端到端验收与文档 | 两台机器、约 10 个会话连续使用一天，核对 Success Metrics；README 中英文更新 | in-progress | - | 2, 3 | [session-board-acceptance.plan.md](../plans/session-board-acceptance.plan.md) |
 
 ### Phase Details
 
