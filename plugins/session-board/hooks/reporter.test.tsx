@@ -1165,3 +1165,78 @@ test('a task notification that arrives between Stop and turn.complete still keep
   await clock.settle()
   expect(last(w).lastPrompt.text).toBe('start the server')
 })
+
+test('an instance superseded by a newer one after a reload stops reporting for good', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  const own = w.mine.reporter
+  // The reloaded module's session.start writes its own token over ours.
+  w.mine.reporter = 'another-instance'
+  const count = w.posts.length
+  await clock.advance(5000)
+  await clock.advance(5000)
+  await $.turn.start({ text: 'still going', turnId: 't1' })
+  await clock.settle()
+  expect(w.posts.length).toBe(count)
+  // Retirement is permanent, even if our own token shows up again.
+  w.mine.reporter = own
+  await clock.advance(5000)
+  await $.command.run(COMMAND)
+  expect(w.posts.length).toBe(count)
+})
+
+test('a retired instance does not write names', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.mine.name = '新实例的名字'
+  await start($, clock)
+  w.mine.reporter = 'another-instance'
+  await clock.advance(5000)
+  await $.command.run(named('name 旧实例'))
+  await clock.settle()
+  expect(w.mine.name).toBe('新实例的名字')
+  expect(w.storeWrites).toEqual([])
+})
+
+test('an instance writes its own token at session start and keeps reporting while it holds it', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  expect(typeof w.mine.reporter).toBe('string')
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(w.posts.length).toBe(3)
+})
+
+// Two register calls cannot run in one test world, so token uniqueness across instances is not asserted here.
+
+test('a token that cannot be written does not silence the reporter', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.stateDeny = 'state is read-only here'
+  await start($, clock)
+  await clock.advance(5000)
+  expect(w.posts.length).toBe(2)
+})
+
+test('a failed token write keeps reporting even when state holds an older instance token', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  w.mine.reporter = 'older-token'
+  w.stateDeny = 'state is read-only here'
+  await start($, clock)
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(w.posts.length).toBe(3)
+})
+
+test('a missing token value does not silence the reporter', BOARD, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  const w = world(on)
+  await start($, clock)
+  delete w.mine.reporter
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(w.posts.length).toBe(3)
+})

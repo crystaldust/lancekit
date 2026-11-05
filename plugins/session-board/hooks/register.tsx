@@ -5,11 +5,14 @@ import { buildReport, boardSessionId, eccSummary, parseBoardUrl, projectName, se
 import type { Board, EccLive, EccPlan, EccPrd, EccSummary, Where } from './report'
 import { backgroundDetail, clip, enter, initialStatus, questionDetail, sessionName, toolDetail, withAnswer, withPrompt } from './status'
 import type { SessionState, Status } from './status'
+import type { ReporterToken } from '../types'
 
 type $ = EngineInterface
 
 /** The session's name, kept by the host so a reload (a changed option, say) does not lose it. */
 const NAME = { plugin: 'session-board', key: 'name' } as const
+/** Which module instance reports for the session: each instance writes its token here, and an older one stands down. */
+const REPORTER = { plugin: 'session-board', key: 'reporter' } as const
 const USAGE = [
   '/session-board              看连接状态，并立刻上报一次',
   '/session-board name <名称>  给这个会话起名，大屏上显示名称而不是项目名',
@@ -75,6 +78,26 @@ type Reporter = {
   switchedRevision: number
   /** The lookup of the new id (and its name) while one is under way; shared by whoever needs the id meanwhile. */
   settling: Promise<string> | null
+  /** This module instance's token; a reload makes a new instance with another one. */
+  token: ReporterToken
+  /** True once a newer instance took over the session: this one sends nothing from then on. */
+  isRetired: boolean
+  /** True once this instance's token is in state; until then a foreign token there is not evidence of a takeover. */
+  isClaimed: boolean
+}
+
+let instances = 0
+/** A token no other register call (this module or a reloaded copy of it) makes. */
+function newToken(): ReporterToken {
+  instances += 1
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${instances}`
+}
+
+/** True when another instance's token is in state; unclaimed, a failed or an empty read counts as not superseded. */
+async function isSuperseded($: $, r: Reporter): Promise<boolean> {
+  if (!r.isClaimed) return false
+  const held = await $.state.get(REPORTER).then(read => read.value as ReporterToken | undefined, () => undefined)
+  return held !== undefined && held !== r.token
 }
 
 async function readEcc($: $): Promise<EccSummary | null> {
@@ -109,7 +132,7 @@ async function readName($: $, id: string): Promise<string | null> {
  * unless the person has named the session since the switch, which then counts like a /clear.
  */
 async function settleName($: $, r: Reporter, id: string, switched: 'clear' | 'resume' | null, generation: number) {
-  if (switched === null) return
+  if (switched === null || r.isRetired) return
   if (switched === 'resume' && r.nameRevision === r.switchedRevision) {
     const name = await readName($, id).catch(() => null)
     if (r.generation !== generation || r.nameRevision !== r.switchedRevision) return
@@ -149,13 +172,18 @@ function currentId($: $, r: Reporter): Promise<string> {
 
 async function postOnce($: $, r: Reporter) {
   const { board, status } = r
-  if (board === null || status === null) return
+  if (board === null || status === null || r.isRetired) return
   let now = 0
   try {
     now = await $.clock.now()
     // Read once: a /clear or /resume may replace r.sessionId while this request is out.
     const sessionId = await currentId($, r)
     const body = JSON.stringify(buildReport(status, r.where, await readEcc($), now))
+    // Checked last, right before sending, so a superseded instance does not send one more stale report.
+    if (await isSuperseded($, r)) {
+      r.isRetired = true
+      return
+    }
     const request = $.http.fetch(sessionUrl(board, boardSessionId(sessionId)), {
       method: 'POST',
       headers: { Authorization: `Bearer ${board.token}`, 'Content-Type': 'application/json' },
@@ -266,6 +294,7 @@ async function pruneNames($: $) {
 
 /** Sets (or, for blank text, clears) the session's name, keeps it in state and reports it at once. */
 async function rename($: $, r: Reporter, text: string): Promise<string> {
+  if (r.isRetired) return '这个会话已由重新加载后的插件实例接管，名称没有改动，请在新实例上重试。'
   // A switch still settling should finish first; it is bounded so a hung host cannot stall the command.
   const isSettledFirst = await isSettled($, r)
   const name = sessionName(text)
@@ -307,6 +336,9 @@ export const register: Register = (on, options) => {
     nameRevision: 0,
     switchedRevision: 0,
     settling: null,
+    token: newToken(),
+    isRetired: false,
+    isClaimed: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -320,8 +352,11 @@ export const register: Register = (on, options) => {
     r.endedId = null
     r.generation += 1
     r.status = r.status ?? initialStatus(await $.clock.now())
+    // Claims the session before the first report. If the write fails, state may still hold an older instance's
+    // token, so this instance stays unclaimed and keeps reporting rather than mistaking that token for a takeover.
+    r.isClaimed = await $.state.set(REPORTER, r.token).then(() => true, () => false)
     $.clock.every(HEARTBEAT_MS, async () => {
-      if (r.status?.state === 'ended') return
+      if (r.isRetired || r.status?.state === 'ended') return
       if (await expireBackground($, r)) return
       return send($, r)
     })

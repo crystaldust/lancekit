@@ -3,10 +3,14 @@
 /** The name given with `/session-board name`; null shows the project's name. */
 export type SessionName = string | null
 
+/** Identifies the module instance that reports for the session; a reload makes a new one. */
+export type ReporterToken = string
+
 declare module 'claude-code' {
   interface PluginState {
     'session-board': {
       name: SessionName
+      reporter: ReporterToken
     }
   }
 }
