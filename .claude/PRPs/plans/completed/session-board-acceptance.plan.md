@@ -156,10 +156,10 @@ claude plugin validate .
 ```
 
 ## Acceptance Criteria
-- [ ] `metrics.py` 和测试完成
-- [ ] README 中英文同步更新
-- [ ] PRD Open Questions 更新
-- [ ] 用户一天试用的数据全部达标（Task 6）
+- [x] `metrics.py` 和测试完成
+- [x] README 中英文同步更新
+- [x] PRD Open Questions 更新
+- [x] 用户一天试用的数据全部达标（Task 6）→ 部分达标：两台机器未测、等批准样本不足，按用户同意作为例外，见 reports/session-board-acceptance-report.md
 
 ## Risks
 | Risk | Likelihood | Impact | Mitigation |
