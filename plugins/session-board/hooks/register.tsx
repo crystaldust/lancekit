@@ -1,0 +1,507 @@
+import type { EngineInterface, Register } from 'claude-code'
+
+import { needsRefresh, nameKey, NAME_KEY_PREFIX, parseEntry, staleNames } from './names'
+import { buildReport, boardSessionId, eccSummary, parseBoardUrl, projectName, sessionUrl } from './report'
+import type { Board, EccLive, EccPlan, EccPrd, EccSummary, Where } from './report'
+import { backgroundDetail, clip, enter, initialStatus, questionDetail, sessionName, toolDetail, withAnswer, withPrompt } from './status'
+import type { SessionState, Status } from './status'
+import type { ReporterToken } from '../types'
+
+type $ = EngineInterface
+
+/** The session's name, kept by the host so a reload (a changed option, say) does not lose it. */
+const NAME = { plugin: 'session-board', key: 'name' } as const
+/** Which module instance reports for the session: each instance writes its token here, and an older one stands down. */
+const REPORTER = { plugin: 'session-board', key: 'reporter' } as const
+const USAGE = [
+  '/session-board              看连接状态，并立刻上报一次',
+  '/session-board name <名称>  给这个会话起名，大屏上显示名称而不是项目名',
+  '/session-board name         清除名称',
+].join('\n')
+
+/** Prompt origins that are the person's own words. */
+const PERSON_ORIGINS = ['composer', 'bridge', 'sdk']
+
+const HEARTBEAT_MS = 5000
+/** How long a session may stay working on background tasks alone before it asks for the person. */
+const BACKGROUND_WAIT_MS = 3 * 60_000
+/** How long an exiting session waits for its last report. */
+const END_REPORT_MS = 1500
+/** A request the board has not answered by then counts as failed; the next heartbeat tries again. */
+const REQUEST_TIMEOUT_MS = 4000
+const ERROR_CHARS = 160
+
+const STATE_NAMES: Record<SessionState, string> = {
+  working: '工作中',
+  'needs-approval': '等批准',
+  'your-turn': '轮到你',
+  ended: '已退出',
+}
+
+type Approval = { tool: string | null; agentId: string | undefined }
+
+type Link = { attemptAt: number | null; okAt: number | null; error: string | null }
+
+const clock = (ms: number) => new Date(ms).toLocaleTimeString('zh-CN', { hour12: false })
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, ERROR_CHARS)
+
+/**
+ * What this session has told the board, held for the life of the module (a reload starts it over).
+ * The one mutable record of the mod; its fields are replaced, never edited in place.
+ */
+type Reporter = {
+  board: Board | null
+  status: Status | null
+  where: Where
+  sessionId: string | null
+  /** What made the current wait: the tool (null for a notification) and the loop it waits in. */
+  approval: Approval | null
+  link: Link
+  inFlight: Promise<void> | null
+  isDirty: boolean
+  /** The detail line for tasks still running behind the turn that just stopped; null for none. */
+  background: string | null
+  /** Where the prompt that starts the next turn came from; null when no prompt.submit was seen. */
+  promptOrigin: { kind: string; text: string } | null
+  /** When the turn that left tasks running ended; null once the wait has run out or the tasks are gone. */
+  backgroundSince: number | null
+  /** True once the wait ran out and the session was handed back to the person with the tasks still running. */
+  backgroundExpired: boolean
+  /** Set by /clear or /resume until the new session id is known and the name has been settled for it. */
+  switched: 'clear' | 'resume' | null
+  /** Counts session starts and /clear or /resume switches, so a slow lookup can tell it is out of date. */
+  generation: number
+  /** The id of the session that just ended in a /clear or /resume; the host may still answer with it for a moment. */
+  endedId: string | null
+  /** Bumped by every rename; compared with its value at the switch to tell whether the person named the session since. */
+  nameRevision: number
+  switchedRevision: number
+  /** The lookup of the new id (and its name) while one is under way; shared by whoever needs the id meanwhile. */
+  settling: Promise<string> | null
+  /** This module instance's token; a reload makes a new instance with another one. */
+  token: ReporterToken
+  /** True once a newer instance took over the session: this one sends nothing from then on. */
+  isRetired: boolean
+  /** True once this instance's token is in state; until then a foreign token there is not evidence of a takeover. */
+  isClaimed: boolean
+}
+
+let instances = 0
+/** A token no other register call (this module or a reloaded copy of it) makes. */
+function newToken(): ReporterToken {
+  instances += 1
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${instances}`
+}
+
+/** True when another instance's token is in state; unclaimed, a failed or an empty read counts as not superseded. */
+async function isSuperseded($: $, r: Reporter): Promise<boolean> {
+  if (!r.isClaimed) return false
+  const held = await $.state.get(REPORTER).then(read => read.value as ReporterToken | undefined, () => undefined)
+  return held !== undefined && held !== r.token
+}
+
+async function readEcc($: $): Promise<EccSummary | null> {
+  try {
+    // ecc-progress's own values; undefined where it is not installed.
+    const prd = await $.state.get({ plugin: 'ecc-progress', key: 'prd' } as never)
+    const plan = await $.state.get({ plugin: 'ecc-progress', key: 'plan' } as never)
+    const live = await $.state.get({ plugin: 'ecc-progress', key: 'live' } as never)
+    return eccSummary(prd.value as EccPrd | null, plan.value as EccPlan | null, live.value as EccLive | null)
+  } catch {
+    return null
+  }
+}
+
+/** Writes the name for `id` into the store (null removes it); throws when the store refuses. */
+async function writeName($: $, id: string, name: string | null, now: number) {
+  if (name === null) await $.store.delete(nameKey(id))
+  else await $.store.set(nameKey(id), { name, at: now })
+}
+
+/** The stored name for `id`, stamped anew when old enough that pruning could take it; null for none. */
+async function readName($: $, id: string): Promise<string | null> {
+  const found = parseEntry(await $.store.get(nameKey(id)))
+  if (found === null) return null
+  const now = await $.clock.now()
+  if (needsRefresh(found, now)) await writeName($, id, found.name, now).catch(() => {})
+  return found.name
+}
+
+/**
+ * After a /clear the name goes under the new id; after a /resume the resumed conversation's name replaces it,
+ * unless the person has named the session since the switch, which then counts like a /clear.
+ */
+async function settleName($: $, r: Reporter, id: string, switched: 'clear' | 'resume' | null, generation: number) {
+  if (switched === null || r.isRetired) return
+  if (switched === 'resume' && r.nameRevision === r.switchedRevision) {
+    const name = await readName($, id).catch(() => null)
+    if (r.generation !== generation || r.nameRevision !== r.switchedRevision) return
+    r.where = { ...r.where, name }
+    await $.state.set(NAME, name).catch(() => {})
+    return
+  }
+  const { name } = r.where
+  if (name !== null) await writeName($, id, name, await $.clock.now()).catch(() => {})
+}
+
+/** The session's id; the first time after a /clear or /resume it also settles the name for the new id. */
+function currentId($: $, r: Reporter): Promise<string> {
+  if (r.settling !== null) return r.settling
+  if (r.sessionId !== null) return Promise.resolve(r.sessionId)
+  const generation = r.generation
+  const lookup = (async () => {
+    const id = await $.session.id()
+    // A session.end ran meanwhile: start over for the new generation.
+    if (r.generation !== generation) return currentId($, r)
+    // The host still answers with the ended session's id: leave it unset, a later call settles.
+    if (id === r.endedId) throw new Error('会话 id 还没有切换')
+    r.endedId = null
+    r.sessionId = id
+    const { switched } = r
+    r.switched = null
+    await settleName($, r, id, switched, generation)
+    return id
+  })()
+  r.settling = lookup
+  const release = () => {
+    if (r.settling === lookup) r.settling = null
+  }
+  lookup.then(release, release)
+  return lookup
+}
+
+async function postOnce($: $, r: Reporter) {
+  const { board, status } = r
+  if (board === null || status === null || r.isRetired) return
+  let now = 0
+  try {
+    now = await $.clock.now()
+    // Read once: a /clear or /resume may replace r.sessionId while this request is out.
+    const sessionId = await currentId($, r)
+    const body = JSON.stringify(buildReport(status, r.where, await readEcc($), now))
+    // Checked last, right before sending, so a superseded instance does not send one more stale report.
+    if (await isSuperseded($, r)) {
+      r.isRetired = true
+      return
+    }
+    const request = $.http.fetch(sessionUrl(board, boardSessionId(sessionId)), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${board.token}`, 'Content-Type': 'application/json' },
+      body,
+    })
+    const response = await Promise.race([request, $.clock.sleep(REQUEST_TIMEOUT_MS).then(() => null)])
+    if (response === null) {
+      r.link = { ...r.link, attemptAt: now, error: `${REQUEST_TIMEOUT_MS / 1000} 秒内没有回应` }
+      return
+    }
+    const reason = response.text.trim() ? `HTTP ${response.status}: ${response.text.trim()}` : `HTTP ${response.status}`
+    r.link = { attemptAt: now, okAt: response.ok ? now : r.link.okAt, error: response.ok ? null : clip(reason, ERROR_CHARS) }
+  } catch (error) {
+    r.link = { ...r.link, attemptAt: now, error: errorText(error) }
+  }
+}
+
+/** One request at a time; a change made while one is out is sent right after it. */
+function send($: $, r: Reporter): Promise<void> {
+  if (r.inFlight !== null) {
+    r.isDirty = true
+    return r.inFlight
+  }
+  r.inFlight = (async () => {
+    do {
+      r.isDirty = false
+      await postOnce($, r)
+    } while (r.isDirty)
+  })().finally(() => {
+    r.inFlight = null
+  })
+  return r.inFlight
+}
+
+/** Applies `change`; a real change is reported at once, off the event's own dispatch. */
+async function apply($: $, r: Reporter, change: (status: Status, now: number) => Status) {
+  const now = await $.clock.now()
+  const current = r.status ?? initialStatus(now)
+  const changed = change(current, now)
+  if (changed === r.status) return
+  r.status = changed
+  if (changed !== current) $.clock.after(0, () => send($, r))
+}
+
+/**
+ * Once tasks have run behind a finished turn for BACKGROUND_WAIT_MS, the session counts as the person's turn
+ * (a dev server never ends); the tasks stay in the detail. True when it moved.
+ */
+async function expireBackground($: $, r: Reporter): Promise<boolean> {
+  const { background, backgroundSince } = r
+  if (background === null || backgroundSince === null || r.status?.state !== 'working') return false
+  if ((await $.clock.now()) - backgroundSince < BACKGROUND_WAIT_MS) return false
+  // A turn may have started while the clock was read.
+  if (r.background !== background || r.status?.state !== 'working') return false
+  r.backgroundSince = null
+  r.backgroundExpired = true
+  await apply($, r, (s, now) => (r.background === background && s.state === 'working' ? enter(s, 'your-turn', now, background) : s))
+  return true
+}
+
+/** True once the session id is known and its name settled; false when that failed or took too long. */
+async function isSettled($: $, r: Reporter): Promise<boolean> {
+  const settled = currentId($, r).then(() => true, () => false)
+  return Promise.race([settled, $.clock.sleep(REQUEST_TIMEOUT_MS).then(() => false)])
+}
+
+/** Writes the name (null removes it) for this session into the store; false when that failed. */
+async function saveName($: $, r: Reporter, name: string | null): Promise<boolean> {
+  try {
+    await writeName($, await currentId($, r), name, await $.clock.now())
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The name a fresh process starts with: the host's copy after a reload, else the one stored for this session id. */
+async function restoreName($: $): Promise<string | null> {
+  const held = await $.state.get(NAME).then(read => read.value as string | null | undefined, () => null)
+  if (held !== undefined) return held
+  try {
+    const found = await readName($, await $.session.id())
+    if (found !== null) await $.state.set(NAME, found).catch(() => {})
+    return found
+  } catch {
+    return null
+  }
+}
+
+/** Forgets stored names that are malformed, older than 90 days or beyond the newest 200. Best effort. */
+async function pruneNames($: $) {
+  try {
+    const keys = (await $.store.keys()).filter(key => key.startsWith(NAME_KEY_PREFIX))
+    const entries: [string, unknown][] = []
+    for (const key of keys) entries.push([key, await $.store.get(key)])
+    const now = await $.clock.now()
+    const scanned = new Map(entries)
+    for (const key of staleNames(entries, now)) {
+      // Re-read: the entry may have been renamed or reopened since the scan.
+      const fresh = await $.store.get(key)
+      const isUnchanged = JSON.stringify(fresh) === JSON.stringify(scanned.get(key))
+      if (isUnchanged || staleNames([[key, fresh]], now).length > 0) await $.store.delete(key)
+    }
+  } catch {
+    // Pruning is housekeeping; the next start tries again.
+  }
+}
+
+/** Sets (or, for blank text, clears) the session's name, keeps it in state and reports it at once. */
+async function rename($: $, r: Reporter, text: string): Promise<string> {
+  if (r.isRetired) return '这个会话已由重新加载后的插件实例接管，名称没有改动，请在新实例上重试。'
+  // A switch still settling should finish first; it is bounded so a hung host cannot stall the command.
+  const isSettledFirst = await isSettled($, r)
+  const name = sessionName(text)
+  r.nameRevision += 1
+  r.where = { ...r.where, name }
+  $.clock.after(0, () => send($, r))
+  const kept = await $.state.set(NAME, name).then(() => true, () => false)
+  const stored = isSettledFirst && (await saveName($, r, name))
+  const project = projectName(r.where.cwd)
+  const shown =
+    name !== null ? `名称已设为「${name}」`
+    : text.trim() !== '' ? `名称里没有能显示的字，已清除，大屏上显示项目名 ${project}`
+    : `名称已清除，大屏上显示项目名 ${project}`
+  return [
+    shown,
+    kept ? null : '名称没能保存：这次会话里有效，插件重新加载（比如改了选项）后会丢，需要重设。',
+    stored ? null : '名称没能存到本机，下次打开不会恢复。',
+    r.board === null ? '还没配置看板地址，配好后会一起上报。' : null,
+  ].filter(line => line !== null).join('\n')
+}
+
+export const register: Register = (on, options) => {
+  const r: Reporter = {
+    board: parseBoardUrl(String(options.boardUrl ?? ''), String(options.token ?? '')),
+    status: null,
+    where: { host: 'unknown', cwd: '', name: null },
+    sessionId: null,
+    approval: null,
+    link: { attemptAt: null, okAt: null, error: null },
+    inFlight: null,
+    isDirty: false,
+    background: null,
+    promptOrigin: null,
+    backgroundSince: null,
+    backgroundExpired: false,
+    switched: null,
+    generation: 0,
+    endedId: null,
+    nameRevision: 0,
+    switchedRevision: 0,
+    settling: null,
+    token: newToken(),
+    isRetired: false,
+    isClaimed: false,
+  }
+
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'session-board', description: 'Show whether this session reaches the session board; "name <名称>" names the session on the board' })
+    const host = await $.process.run(['hostname', '-s']).then(r => r.stdout.trim(), () => '')
+    const kept = await restoreName($)
+    r.where = { host: host || 'unknown', cwd: e.cwd, name: kept }
+    r.sessionId = null
+    r.switched = null
+    r.settling = null
+    r.endedId = null
+    r.generation += 1
+    r.status = r.status ?? initialStatus(await $.clock.now())
+    // Claims the session before the first report. If the write fails, state may still hold an older instance's
+    // token, so this instance stays unclaimed and keeps reporting rather than mistaking that token for a takeover.
+    r.isClaimed = await $.state.set(REPORTER, r.token).then(() => true, () => false)
+    $.clock.every(HEARTBEAT_MS, async () => {
+      if (r.isRetired || r.status?.state === 'ended') return
+      if (await expireBackground($, r)) return
+      return send($, r)
+    })
+    $.clock.after(0, () => send($, r))
+    $.clock.after(0, () => pruneNames($))
+    return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    r.promptOrigin = { kind: e.origin?.kind ?? 'composer', text: e.text }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      // Only the prompt that started this very turn counts: another may have gone into a running turn.
+      const origin = r.promptOrigin?.text === e.text ? r.promptOrigin.kind : null
+      r.promptOrigin = null
+      r.approval = null
+      r.background = null
+      r.backgroundSince = null
+      r.backgroundExpired = false
+      const isPerson = origin === null || PERSON_ORIGINS.includes(origin)
+      await apply($, r, (s, now) => {
+        const working = enter(s, 'working', now)
+        return isPerson ? withPrompt(working, e.text, now) : working
+      })
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.PermissionRequest', async ($, e, next) => {
+    r.approval = { tool: e.tool_name, agentId: e.agent_id }
+    await apply($, r, (s, now) => enter(s, 'needs-approval', now, toolDetail(e.tool_name, e.tool_input)))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.Notification', async ($, e, next) => {
+    if (e.notification_type === 'permission_prompt' && r.status?.state !== 'needs-approval') {
+      r.approval = { tool: null, agentId: e.agent_id }
+      await apply($, r, (s, now) => enter(s, 'needs-approval', now, clip(e.message, 200) || null))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', async ($, e, next) => {
+    const detail = e.tool === 'AskUserQuestion' ? questionDetail(e) : toolDetail(e.tool, e)
+    if (e.agentId === undefined && e.tool === 'AskUserQuestion') {
+      r.approval = { tool: e.tool, agentId: undefined }
+      await apply($, r, (s, now) => enter(s, 'needs-approval', now, detail))
+    }
+    const result = await next(e)
+    const { approval } = r
+    const waitedOnThis =
+      r.status?.state === 'needs-approval' &&
+      approval !== null &&
+      approval.agentId === e.agentId &&
+      (approval.tool === null || r.status.detail === detail)
+    if (waitedOnThis) {
+      r.approval = null
+      const state = r.backgroundExpired ? 'your-turn' : 'working'
+      await apply($, r, (s, now) => enter(s, state, now, r.background))
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      r.approval = null
+      const { background } = r
+      await apply($, r, (s, now) =>
+        withAnswer(background === null ? enter(s, 'your-turn', now) : enter(s, 'working', now, background), e.answer, now),
+      )
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.Stop', async ($, e, next) => {
+    const tasks = e.agent_id === undefined ? (e.background_tasks ?? []) : []
+    if (tasks.length > 0) {
+      const detail = backgroundDetail(tasks)
+      r.background = detail
+      r.backgroundSince = await $.clock.now()
+      r.backgroundExpired = false
+      r.approval = null
+      await apply($, r, (s, now) => enter(s, 'working', now, detail))
+    } else if (e.agent_id === undefined) {
+      r.background = null
+      r.backgroundSince = null
+      r.backgroundExpired = false
+      await apply($, r, (s, now) => (s.state === 'working' ? enter(s, 'your-turn', now) : s))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    r.sessionId = e.sessionId
+    const now = await $.clock.now()
+    r.status = enter(r.status ?? initialStatus(now), 'ended', now)
+    await Promise.race([send($, r), $.clock.sleep(END_REPORT_MS)])
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      // The process goes on under another id, and no session.start follows.
+      r.sessionId = null
+      r.switched = e.reason
+      r.settling = null
+      r.generation += 1
+      r.endedId = e.sessionId
+      r.switchedRevision = r.nameRevision
+      r.background = null
+      r.backgroundSince = null
+      r.backgroundExpired = false
+      r.promptOrigin = null
+      r.status = initialStatus(await $.clock.now())
+      // The host answers with the ended id until this hook returns, so the new id is read on the next tick.
+      // That settles the name without a board or a heartbeat.
+      $.clock.after(0, () => currentId($, r).then(() => undefined, () => undefined))
+      $.clock.after(0, () => send($, r))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('command.run', { command: 'session-board' }, async ($, e) => {
+    const [sub = '', ...rest] = e.args.trim().split(/\s+/)
+    if (sub === 'name') return { text: await rename($, r, rest.join(' ')) }
+    if (sub !== '') return { text: `不认识的参数：${clip(sub, 40)}\n${USAGE}` }
+    const { board } = r
+    if (board === null) {
+      return {
+        text: [
+          'session-board 还没配置看板地址。',
+          '在 /config 里找到 session-board，把 board.py 启动时打印的地址（可以带 ?token=）填进 Board URL。',
+        ].join('\n'),
+      }
+    }
+    // Bounded: a change queued behind a hung request must not hold the command too.
+    await Promise.race([send($, r), $.clock.sleep(REQUEST_TIMEOUT_MS)])
+    const now = await $.clock.now()
+    const lines = [
+      `看板  ${board.base}${board.token ? '' : '（没有令牌，看板会拒绝）'}`,
+      `名称  ${r.where.name ?? `（未设置，显示项目名 ${projectName(r.where.cwd)}）`}`,
+      `状态  ${r.status ? `${STATE_NAMES[r.status.state]}（自 ${clock(r.status.since)}）` : '未知'}`,
+      r.link.error === null && r.link.okAt !== null
+        ? `上报  成功，${Math.round((now - r.link.okAt) / 1000)} 秒前`
+        : `上报  失败：${r.link.error ?? '还没有发出'}${r.link.okAt !== null ? `；上次成功在 ${clock(r.link.okAt)}` : ''}`,
+    ]
+    return { text: lines.join('\n') }
+  })
+}

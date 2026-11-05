@@ -5,7 +5,7 @@
     "url": "https://github.com/crystaldust"
   },
   "metadata": {
-    "description": "Claude Code extensions: ECC workflow helpers and session chatlogs"
+    "description": "Claude Code extensions: ECC workflow helpers, session chatlogs and a wall board of all sessions"
   },
   "plugins": [
     {
@@ -22,6 +22,11 @@
       "name": "chatlog",
       "source": "./plugins/chatlog",
       "description": "Real-time session chatlog (Markdown + text + JSONL) with interrupts, exits, /clear and resume, plus terminal-style replay"
+    },
+    {
+      "name": "session-board",
+      "source": "./plugins/session-board",
+      "description": "Reports each session's state, last prompt, last answer and ECC progress to a wall board served by a zero-dependency Python server"
     }
   ]
 }

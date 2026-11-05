@@ -6,10 +6,11 @@
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.304-d97757)](https://code.claude.com)
 [![ECC](https://img.shields.io/badge/ECC-2.2.3-555)](https://github.com/affaan-m/ECC)
 
-一个 [Claude Code](https://code.claude.com) 插件市场，包含三个插件：
+一个 [Claude Code](https://code.claude.com) 插件市场，包含四个插件：
 
 - 两个 [ECC](https://github.com/affaan-m/ECC) 工作流（`/ecc:prp-prd` → `/ecc:prp-plan` → `/ecc:prp-implement`）的扩展：一个实时进度面板，一个规划文档一致性审计。
 - 一个实时记录每次会话的聊天日志。
+- 一块跨机器显示哪些会话在等你的看板。
 
 ## 目录
 
@@ -20,6 +21,7 @@
   - [ecc-progress](#ecc-progress)
   - [ecc-doc-check](#ecc-doc-check)
   - [chatlog](#chatlog)
+  - [session-board](#session-board)
 - [开发](#开发)
 - [参与贡献](#参与贡献)
 - [许可证](#许可证)
@@ -31,14 +33,15 @@
 | [`ecc-progress`](plugins/ecc-progress) | mod | 用侧边面板和状态栏显示 PRD 各阶段，以及 `/prp-implement` 执行中的任务和阶段进度 |
 | [`ecc-doc-check`](plugins/ecc-doc-check) | skill | 只读审计 PRD、PRP-PRD 和计划，找出状态不一致、非法状态值、失效或已归档的链接，以及孤立的计划 |
 | [`chatlog`](plugins/chatlog) | mod + skill + 脚本 | 把每条提问、回答和工具调用实时写入 `.claude/chatlog/`，并能回放或导出日志 |
+| [`session-board`](plugins/session-board) | mod + 脚本 | 把每个会话的状态上报到一块大屏看板，跨局域网里的多台机器显示谁在等你 |
 
 *mod* 是基于 Claude Code 函数钩子（`hooks/register.tsx`）的插件，可以绘制面板、设置状态栏、注册命令和工具。
 
 ## 环境要求
 
-- **Claude Code 2.1.304 或更新版本。** `ecc-progress` 和 `chatlog` 是 mod。mod 使用函数钩子，这是一个抢先体验的 API，可能随 Claude Code 版本变化。
+- **Claude Code 2.1.304 或更新版本。** `ecc-progress`、`chatlog` 和 `session-board` 是 mod。mod 使用函数钩子，这是一个抢先体验的 API，可能随 Claude Code 版本变化。
 - **ECC 2.2.3**，`ecc-progress` 和 `ecc-doc-check` 需要。两者都读取 ECC 生成的文档，依赖的格式见 [docs/ecc-doc-formats.md](docs/ecc-doc-formats.md)。
-- **Python 3.10+**，`ecc-doc-check` 和 chatlog 回放脚本需要。
+- **Python 3.10+**，`ecc-doc-check`、chatlog 回放脚本和 session-board 看板服务需要。
 
 ## 安装
 
@@ -49,6 +52,7 @@ claude plugin marketplace add crystaldust/lancekit   # 也可以是本地克隆�
 claude plugin install ecc-progress@lancekit
 claude plugin install ecc-doc-check@lancekit
 claude plugin install chatlog@lancekit
+claude plugin install session-board@lancekit
 ```
 
 更新时，先刷新插件市场再更新插件，然后开一个新会话：
@@ -151,6 +155,41 @@ python3 plugins/chatlog/scripts/chatlog_replay.py [n|path] [--list] [--play] [--
 | `gitignore` | `true` | 写一个 `.gitignore`，让 chatlog 目录不进入 git |
 | `redact` | `true` | 在写入磁盘前遮盖 API 密钥、令牌、私钥和 `password=` 的值 |
 
+### session-board
+
+在大屏上集中显示局域网里所有会话，按"谁在等你"排序。每个会话把自己的状态、最后一次交代、最后一次回答的结尾和 ECC 进度上报给一个小型 Python 服务，大屏上用任意浏览器打开看板即可。
+
+- **等批准**和**轮到你**的会话在上方显示为大卡片，带计时，站在远处也能看出该去哪个窗口、等了多久。等批准的卡片还显示等着批准的工具调用，例如 `Bash: pnpm test`。
+- 工作中、失联和已退出的会话在下方显示为小卡片。
+- 会话 30 秒没有上报就显示为失联；已退出的会话保留 10 分钟。
+
+**1. 启动看板**，在接大屏的机器上：
+
+```bash
+python3 plugins/session-board/scripts/board.py --host 0.0.0.0 --token <令牌> --record states.jsonl
+```
+
+它会为每个监听地址打印一条链接，例如 `http://192.168.0.226:7777/?token=…`，在大屏上打开其中一条。不加 `--host` 时只监听 `127.0.0.1`；不给 `--token`（或 `SESSION_BOARD_TOKEN`）时随机生成一个令牌并打印出来。已安装的插件副本在 `~/.claude/plugins/` 下，也可以从克隆的仓库运行这个脚本。
+
+**2. 让各台机器指向它。** 在 `/config` 的 session-board 下填 **Board URL**。可以直接粘贴打印出来的整条链接，里面的令牌会被使用，但这条链接会明文保存在设置里。想把令牌放进安全存储，就在 Board URL 里只填地址，令牌填在 **Token** 里：安装插件时 Claude Code 会询问这一项，`/config` 里不列出它。
+
+| 选项 | 默认值 | 含义 |
+|---|---|---|
+| `boardUrl` | 空 | 看板地址，其中的 `?token=` 会被当作令牌 |
+| `token` | 空 | 看板令牌，保存在安全存储里 |
+
+保存选项后插件重新加载，会话随即开始上报。`/session-board` 显示看板地址、本会话的状态和最近一次上报的结果。
+
+**给会话起名：** `/session-board name <名称>` 让卡片显示这个名称而不是项目名，同一项目开了几个会话也能分清。项目名移到下面一行。`/session-board name` 后面不写名称就是清除。名称跟着对话一起保存，用 `--resume`、`--continue` 或 `/resume` 重新打开时会恢复；`/clear` 和改选项都不影响。名称只存在本机，90 天没改名也没重新打开的名称会被忘掉（本机最多保留 200 个）。
+
+**后台任务：** 一轮结束时如果还有后台任务在跑，这个会话显示为工作中，详情行写着任务情况（例如 `后台 2 个任务：shell · subagent`），先不会出现在“等你处理”里；超过 3 分钟任务还没做完，就照样转到“轮到你”（详情行仍写着任务情况），这样开着开发服务器的会话也会叫你。
+
+**没有会话时先试看：** `python3 plugins/session-board/scripts/demo.py --token <令牌>` 推送 10 个模拟会话。
+
+**核对一天的使用：** `python3 plugins/session-board/scripts/metrics.py states.jsonl` 读取记录文件，给出等批准时长（中位数、P90）、上报延迟和同时在线的会话数。
+
+**局限。** 令牌是共享口令，看板用明文 HTTP，只在可信的网络里使用。看板的状态只在内存里，重启后各会话在下一次心跳（每 5 秒）时重新出现。数据契约见 [docs/session-board-contract.md](docs/session-board-contract.md)。
+
 ## 开发
 
 ```
@@ -158,6 +197,8 @@ python3 plugins/chatlog/scripts/chatlog_replay.py [n|path] [--list] [--play] [--
 plugins/ecc-progress/             # mod：hooks/register.tsx、hooks/parse.ts、测试
 plugins/ecc-doc-check/            # skill：skills/prd-plan-audit（SKILL.md、scripts/、tests/）
 plugins/chatlog/                  # mod：hooks/、scripts/（回放）、skills/chatlog-replay
+plugins/session-board/            # mod：hooks/（上报）；scripts/（看板服务、模拟数据、指标）；web/（大屏页面）
+docs/session-board-contract.md    # session-board 上报端和看板服务之间的数据契约
 docs/ecc-doc-formats.md           # ECC 插件依赖的 ECC 文档格式
 ```
 
@@ -167,9 +208,12 @@ docs/ecc-doc-formats.md           # ECC 插件依赖的 ECC 文档格式
 claude plugin validate .                          # 插件市场和各插件
 claude plugin test plugins/ecc-progress
 claude plugin test plugins/chatlog
+claude plugin test plugins/session-board
 (cd plugins/ecc-doc-check/skills/prd-plan-audit && python3 -m unittest discover -s tests)
 (cd plugins/chatlog/scripts && python3 -m unittest test_chatlog_replay)
-claude --plugin-dir plugins/ecc-progress --plugin-dir plugins/chatlog   # 从工作区加载
+python3 -m unittest discover -s plugins/session-board/scripts
+node --test plugins/session-board/web/page.test.mjs
+claude --plugin-dir plugins/ecc-progress --plugin-dir plugins/chatlog --plugin-dir plugins/session-board   # 从工作区加载
 ```
 
 每次加载 mod 时，Claude Code 会把生成的类型写到 `plugins/*/.claude-plugin/types/`，这个目录已被 git 忽略。
@@ -181,7 +225,7 @@ claude --plugin-dir plugins/ecc-progress --plugin-dir plugins/chatlog   # 从工
 - 使用 [Conventional Commits](https://www.conventionalcommits.org)：`feat:`、`fix:`、`docs:`、`chore:` 等。
 - 插件的 `version`（在 `.claude-plugin/plugin.json` 里）单独用一个 `chore: bump <plugin> to X` 提交升级。已安装的副本按版本号缓存，不升版本号，用户就收不到改动。
 - 提交 pull request 前，先运行上面的校验和测试。
-- ECC 升级后，重新核对 [docs/ecc-doc-formats.md](docs/ecc-doc-formats.md)，并同时更新 `plugins/ecc-progress/hooks/parse.ts` 和 `plugins/ecc-doc-check/skills/prd-plan-audit/scripts/audit.py`。
+- ECC 升级后，重新核对 [docs/ecc-doc-formats.md](docs/ecc-doc-formats.md)，并同时更新 `plugins/ecc-progress/hooks/parse.ts` 和 `plugins/ecc-doc-check/skills/prd-plan-audit/scripts/audit.py`。`plugins/session-board/hooks/report.ts` 读取 ecc-progress 的状态，也要一并核对。
 
 ## 许可证
 
