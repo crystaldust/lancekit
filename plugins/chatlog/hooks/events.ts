@@ -84,9 +84,14 @@ function fromCommandRow(text: string, ts: string): ChatEvent[] {
     const args = tagged(text, 'command-args') ?? ''
     return [{ kind: 'user', ts, text: `${name.trim()} ${args.trim()}`.trim(), via: 'command' }]
   }
-  const stdout = tagged(text, 'local-command-stdout')
-  if (stdout === undefined) return []
-  return [{ kind: 'result', ts, id: 'command', isError: false, ...previewOf(stdout) }]
+  const bash = tagged(text, 'bash-input')
+  if (bash !== undefined) return [{ kind: 'user', ts, text: `! ${bash.trim()}`, via: 'command' }]
+  const stdout = tagged(text, 'local-command-stdout') ?? tagged(text, 'bash-stdout')
+  const stderr = tagged(text, 'local-command-stderr') ?? tagged(text, 'bash-stderr')
+  if (stdout === undefined && stderr === undefined) return []
+  const output = [stdout ?? '', stderr ?? ''].filter(part => part.trim() !== '').join('\n')
+  const isError = (stdout ?? '').trim() === '' && (stderr ?? '').trim() !== ''
+  return [{ kind: 'result', ts, id: 'command', isError, ...previewOf(output) }]
 }
 
 function fromResponse(content: unknown, ts: string): ChatEvent[] {

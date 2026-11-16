@@ -17,6 +17,8 @@ import {
   toText,
   turnNote,
 } from './render'
+import { historyFromTranscript, isAtOrAfter } from './transcript'
+import type { History } from './transcript'
 
 const LOG_SUBDIR = '.claude/chatlog'
 const PANE = 'chatlog-replay'
@@ -24,6 +26,9 @@ const RECENT = 15
 const HTML_FILE = 'chatlog.html'
 /** `$.fs.read` rejects anything larger. */
 const MAX_READ_BYTES = 4 * 1024 * 1024
+/** Lines per read of a transcript, halved while a read overflows what `$.process.run` returns. */
+const TRANSCRIPT_LINES = 2000
+const LOG_EXTENSIONS = ['jsonl', 'md', 'txt'] as const
 const SOURCE_ACTION: Record<string, SessionAction> = {
   startup: 'start',
   resume: 'resume',
@@ -83,52 +88,173 @@ async function logDir($: $): Promise<string> {
   return `${await $.session.root()}/${LOG_SUBDIR}`
 }
 
-/** Logs in the folder, most recently written first. */
+/** Logs in the folder, most recently written first; a hidden one is a rebuild left part way. */
 async function listLogs($: $, dir: string): Promise<LogFile[]> {
   if (!(await $.fs.exists(dir))) return []
   return (await $.fs.list(dir))
-    .filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl'))
+    .filter(entry => entry.kind === 'file' && entry.name.endsWith('.jsonl') && !entry.name.startsWith('.'))
     .map(entry => ({ name: entry.name.slice(0, -'.jsonl'.length), mtimeMs: entry.mtimeMs, size: entry.size }))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
-async function writeEvent($: $, settings: Settings, base: string, event: ChatEvent): Promise<void> {
+async function writeEvents($: $, settings: Settings, base: string, events: readonly ChatEvent[]): Promise<void> {
+  if (events.length === 0) return
   const tz = await tzMinutes($)
-  const clean = settings.redact ? redactEvent(event) : event
+  const clean = settings.redact ? events.map(redactEvent) : events
   await Promise.all([
-    appendFile($, `${base}.jsonl`, `${JSON.stringify({ v: 1, ...clean })}\n`),
-    settings.md ? appendFile($, `${base}.md`, toMarkdown(clean, tz)) : undefined,
-    settings.txt ? appendFile($, `${base}.txt`, toText(clean, tz)) : undefined,
+    appendFile($, `${base}.jsonl`, clean.map(event => `${JSON.stringify({ v: 1, ...event })}\n`).join('')),
+    settings.md ? appendFile($, `${base}.md`, clean.map(event => toMarkdown(event, tz)).join('')) : undefined,
+    settings.txt ? appendFile($, `${base}.txt`, clean.map(event => toText(event, tz)).join('')) : undefined,
   ])
 }
 
-/** Opens this session's log (continuing its file when one exists) and records how it began. */
-async function openLog($: $, settings: Settings, action: SessionAction, sessionId: string): Promise<string> {
+const writeEvent = ($: $, settings: Settings, base: string, event: ChatEvent): Promise<void> =>
+  writeEvents($, settings, base, [event])
+
+/** Starts a log's files afresh: an empty JSONL and the readable copies' headers. */
+async function createLog($: $, settings: Settings, base: string, sessionId: string, cwd: string, ts: string): Promise<void> {
+  const tz = await tzMinutes($)
+  await $.fs.write(`${base}.jsonl`, '')
+  if (settings.md) await $.fs.write(`${base}.md`, markdownHeader(sessionId, cwd, ts, tz))
+  if (settings.txt) await $.fs.write(`${base}.txt`, textHeader(sessionId, cwd, ts, tz))
+}
+
+/**
+ * Reads a file a run of lines at a time, since a transcript may outgrow what one
+ * `$.fs.read` takes, and stops after the run where `isDone` holds for a line. A
+ * single line over 4 MiB is skipped.
+ */
+async function readLines($: $, path: string, isDone: (line: string) => boolean): Promise<string[]> {
+  const lines: string[] = []
+  let from = 1
+  let count = TRANSCRIPT_LINES
+  for (;;) {
+    const to = from + count - 1
+    const ran = await $.process.run(['sed', '-n', `${from},${to}p;${to}q`, path])
+    if (ran.exitCode !== 0) throw new Error(`could not read ${path}: ${ran.stderr.trim()}`)
+    if (ran.isStdoutTruncated) {
+      if (count > 1) count = Math.ceil(count / 2)
+      else from += 1
+      continue
+    }
+    if (ran.stdout === '') return lines
+    const got = ran.stdout.replace(/\n$/, '').split('\n')
+    lines.push(...got)
+    if (got.length < count || got.some(isDone)) return lines
+    from += count
+    count = TRANSCRIPT_LINES
+  }
+}
+
+/**
+ * Where Claude Code keeps this session's transcript: the path a hook was given,
+ * else the one file named after the session under any project's folder; '' if none.
+ */
+async function transcriptPath($: $, sessionId: string, given: string | undefined): Promise<string> {
+  if (given) return given
+  const find = 'for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$1".jsonl; do [ -f "$f" ] && printf %s "$f" && break; done; true'
+  return (await $.process.run(['/bin/sh', '-c', find, 'chatlog', sessionId])).stdout
+}
+
+/** The conversation the transcript holds from before `before`, or null when there is none to recover. */
+async function readHistory($: $, sessionId: string, given: string | undefined, before: string): Promise<History | null> {
+  const path = await transcriptPath($, sessionId, given)
+  if (path === '' || !(await $.fs.exists(path))) return null
+  return historyFromTranscript(await readLines($, path, line => isAtOrAfter(line, before)), sessionId, before)
+}
+
+/** A log's events, or null when it is too large or unreadable to rewrite. */
+async function loggedEvents($: $, dir: string, file: LogFile): Promise<ChatEvent[] | null> {
+  if (file.size > MAX_READ_BYTES) return null
+  return $.fs.read(`${dir}/${file.name}.jsonl`).then(parseLog, () => null)
+}
+
+async function removeLog($: $, base: string): Promise<void> {
+  await $.process.run(['rm', '-f', ...LOG_EXTENSIONS.map(ext => `${base}.${ext}`)])
+}
+
+/** Moves a log's files to another base name, replacing what is there. */
+async function moveLog($: $, from: string, to: string): Promise<void> {
+  const move = 'for ext in jsonl md txt; do [ ! -f "$1.$ext" ] || mv -f "$1.$ext" "$2.$ext" || exit 1; done'
+  const ran = await $.process.run(['/bin/sh', '-c', move, 'chatlog', from, to])
+  if (ran.exitCode !== 0) throw new Error(`could not move ${from} to ${to}: ${ran.stderr.trim()}`)
+}
+
+/**
+ * Writes a log afresh, the recovered history first, beside the old one and then
+ * moved over it, so a failure part way leaves the old log as it was.
+ */
+async function rebuildLog(
+  $: $,
+  settings: Settings,
+  dir: string,
+  sessionId: string,
+  history: History,
+  logged: readonly ChatEvent[],
+): Promise<string> {
+  const tz = await tzMinutes($)
+  const base = `${dir}/${fileStamp(history.startedAt, tz)}_${shortId(sessionId)}`
+  const partial = `${dir}/.rebuild_${shortId(sessionId)}`
+  // The old log opened with a start of its own; after the history, that was a resume.
+  const kept = logged.map(event => (event.kind === 'session' && event.action === 'start' ? { ...event, action: 'resume' as const } : event))
+  await createLog($, settings, partial, sessionId, history.cwd, history.startedAt)
+  await writeEvents($, settings, partial, [...history.events, ...kept])
+  await moveLog($, partial, base)
+  return base
+}
+
+/**
+ * Opens this session's log and records how it began. What the session said
+ * before the chatlog was recording it (it was installed later, or its log was
+ * lost) comes back from Claude Code's transcript: the log is then written afresh,
+ * that history first, and named after when the session really started. A fork
+ * leaves its parent's conversation to the parent's log.
+ *
+ * `cutoff` is when the events that opened the log happened: the transcript's
+ * rows from then on are recorded live, not recovered.
+ */
+async function openLog(
+  $: $,
+  settings: Settings,
+  action: SessionAction,
+  sessionId: string,
+  { transcript, cutoff }: { transcript?: string; cutoff?: string } = {},
+): Promise<string> {
   const tz = await tzMinutes($)
   const cwd = await $.session.cwd()
   const ts = nowIso()
   const dir = await logDir($)
   const existing = (await listLogs($, dir)).find(log => log.name.endsWith(`_${shortId(sessionId)}`))
-  const base = `${dir}/${existing?.name ?? `${fileStamp(ts, tz)}_${shortId(sessionId)}`}`
-  if (!existing) {
-    if (settings.gitignore && !(await $.fs.exists(`${dir}/.gitignore`))) {
-      await $.fs.write(`${dir}/.gitignore`, '*\n')
-    }
-    await $.fs.write(`${base}.jsonl`, '')
-    if (settings.md) await $.fs.write(`${base}.md`, markdownHeader(sessionId, cwd, ts, tz))
-    if (settings.txt) await $.fs.write(`${base}.txt`, textHeader(sessionId, cwd, ts, tz))
+  const logged = existing ? await loggedEvents($, dir, existing) : []
+  const before = logged?.find(event => !Number.isNaN(Date.parse(event.ts)))?.ts ?? cutoff ?? ts
+  const history = logged === null || action === 'fork'
+    ? null
+    : await readHistory($, sessionId, transcript, before).catch(error => {
+      reportFailure($, error)
+      return null
+    })
+  if (!existing && settings.gitignore && !(await $.fs.exists(`${dir}/.gitignore`))) {
+    await $.fs.write(`${dir}/.gitignore`, '*\n')
+  }
+  let base = `${dir}/${existing?.name ?? `${fileStamp(ts, tz)}_${shortId(sessionId)}`}`
+  if (history) {
+    const old = base
+    base = await rebuildLog($, settings, dir, sessionId, history, logged ?? [])
+    if (existing && old !== base) await removeLog($, old)
+  } else if (!existing) {
+    await createLog($, settings, base, sessionId, cwd, ts)
   }
   await update($, logAtom, log => ({ ...log, base, sessionId }))
-  const begun = existing && action === 'start' ? 'resume' : action
+  const begun = (existing || history) && action === 'start' ? 'resume' : action
   await writeEvent($, settings, base, { kind: 'session', ts, action: begun, sessionId, cwd })
   return base
 }
 
-async function currentBase($: $, settings: Settings): Promise<string> {
+async function currentBase($: $, settings: Settings, cutoff: string): Promise<string> {
   const log = await read($, logAtom)
   const sessionId = await $.session.id()
   if (log.base && log.sessionId === sessionId) return log.base
-  return openLog($, settings, 'start', sessionId)
+  return openLog($, settings, 'start', sessionId, { cutoff })
 }
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -140,8 +266,7 @@ function reportFailure($: $, error: unknown): void {
 function record($: $, settings: Settings, events: ChatEvent[]): Promise<void> {
   if (events.length === 0) return Promise.resolve()
   return serially(async () => {
-    const base = await currentBase($, settings)
-    for (const event of events) await writeEvent($, settings, base, event)
+    await writeEvents($, settings, await currentBase($, settings, events[0]?.ts ?? nowIso()), events)
   }).catch(error => reportFailure($, error))
 }
 
@@ -275,7 +400,7 @@ export const register: Register = (on, options) => {
         await writeEvent($, settings, log.base, { kind: 'session', ts: nowIso(), action, sessionId: e.session_id, cwd })
         return
       }
-      await openLog($, settings, action, e.session_id)
+      await openLog($, settings, action, e.session_id, { transcript: e.transcript_path })
     }).catch(error => reportFailure($, error))
     return next(e)
   }).catch(($, e, next) => next(e))

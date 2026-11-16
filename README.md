@@ -126,6 +126,7 @@ Each session is written to `.claude/chatlog/<YYYY-MM-DD_HHMMSS>_<session-id-8>.{
 - Each prompt reaches the disk before the model sees it, and every line carries its time.
 - The log records interrupts, exits, `/clear` and compaction.
 - A resumed session keeps appending to its own file.
+- A session that began before chatlog was installed is not lost. When chatlog first records it (on resume, or the first prompt after install), it reads Claude Code's own transcript (`~/.claude/projects/…/<session-id>.jsonl`). It writes the earlier conversation into the log first and names the file after when the session really began. A log that started partway through a session is rebuilt the same way the next time the session is resumed.
 
 | Command | What it does |
 |---|---|

@@ -126,6 +126,7 @@ python3 plugins/ecc-doc-check/skills/prd-plan-audit/scripts/audit.py --root <pro
 - 每条提问在模型看到之前就已写入磁盘，每一行都带时间。
 - 日志会记录中断、退出、`/clear` 和上下文压缩。
 - 恢复的会话继续追加到原来的文件。
+- 安装 chatlog 之前就开始的会话也不会丢。chatlog 第一次记录它时（resume 时，或安装后的第一条提问），会读取 Claude Code 自己的 transcript（`~/.claude/projects/…/<session-id>.jsonl`），把之前的对话先写进日志，并按会话真正开始的时间给文件命名。从会话中途才开始记录的日志，下次 resume 时也会这样补全。
 
 | 命令 | 作用 |
 |---|---|
