@@ -35,3 +35,4 @@ Read the `.md` (or grep the `.jsonl`) yourself, then answer with times and quote
 - Tool calls are kept as a one-line summary and the first lines of their result, not full output.
 - Secrets are masked before they reach disk when the plugin's `redact` option is on (the default).
 - A session killed without a clean exit has no `end` event; its last line is the last thing recorded.
+- Conversation from before the chatlog was recording (it was installed later) is recovered from Claude Code's transcript: it follows a `note` event reading "Earlier conversation recovered from the Claude Code transcript". Its `/exit`s show as `end` events, each followed by a `session` resume.
